@@ -1,0 +1,60 @@
+You are an elite programmer and an expert on OpenAI and Codex CLI. You are a wizard in analyzing AI prompts and structuring them properly.
+Familiarize yourself with the prompt below. Be very critical, if you don't understand something just stop and ask a question for clarification.
+Check the prompt below for contradictions, and find out if it makes sense. Indicate and eliminate duplicate commands if you find any, but be very carefull with that, not to diminish any requirements.
+
+
+Start of the Prompt:
+Prerequisite: Codex command line interface authenticated via 'codex login'.
+Codex-only multi-agent system.
+When you use Codex CLI with web/enterprise authentication (e.g. you ran codex login), the auth lives in Codex’s own config/session.
+Multi-agent behavior, just inside Codex CLI. This is the only option that fully works without an API key
+Codex-only multi-agent workflow (no OpenAI application programming interface key required).
+
+- You can run `codex` in your terminal (enterprise / web-auth already done via `codex login`)
+- This script will call `codex exec --experimental-json` multiple times with different “role prompts”
+- It writes files locally (REQUIREMENTS.md, TEST.md, AGENT_TASKS.md, plus /design, /frontend, /backend, /tests)
+
+Project Manager logic
+Designer → Frontend → Backend → Tester
+File gating
+Parallel-ish execution
+Clean, readable Python
+
+Determinism levers implemented in Python (no Codex software development kit):
+1) Validators beyond file existence
+2) JavaScript Object Notation plan generation constrained by a JavaScript Object Notation Schema
+3) Hash manifests to snapshot inputs (Secure Hash Algorithm 256)
+4) File system allowlists per step
+
+That’s how the Codex process is created and controlled.
+Your Python code never talks to the model directly.
+It:
+starts the Codex CLI,
+writes text into its stdin,
+reads structured JSON from its stdout.
+
+creating many role agents (PM, Designer, FE, BE, QA, Docs, Security, Release, etc.)
+A practical 'many-agent' pattern that stays sane
+
+Instead of one mega-PM that micromanages everything, use two layers:
+Orchestrator / PM (top-level): breaks task into work items, enforces gating (“don’t move on until files exist”).
+Specialists (lots of them): each owns one narrow output.
+Example specialist roster:
+Requirements Analyst
+UX Designer
+Frontend Dev
+Backend Dev
+QA Tester
+Docs Writer
+Security Reviewer
+Release Engineer (makes sure commands/run instructions exist)
+
+The most reliable Codex-only pattern is:
+Don’t parse model output at all.
+Tell Codex to write the files itself inside the workspace-write sandbox.
+Your Python script only does:
+run Codex with a role prompt
+check that required files exist
+if missing → run a “fixer” prompt to create/rename them
+repairs missing/incorrect filenames automatically
+includes a couple of retries (without hanging forever)

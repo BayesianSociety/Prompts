@@ -1,11 +1,13 @@
+INPUT GPT-5.2 Pro:
+
 You are an elite programmer and an expert on OpenAI and Codex CLI. You are a wizard in analyzing AI prompts and structuring them properly.
 Familiarize yourself with the prompt below. Be very critical, if you don't understand something just stop and ask a question for clarification.
-Check the prompt below for contradictions, and find out if it makes sense. Indicate and eliminate duplicate commands if you find any, but be very carefull with that, not to diminish any requirements.
+Check the prompt below for contradictions, and find out if it makes sense. Clean it up if possible. Indicate and eliminate duplicate commands if you find any, but be very careful with that, not to diminish any requirements.
 
 
 Start of the Prompt:
 Prerequisite: Codex command line interface authenticated via 'codex login'.
-Codex-only multi-agent system.
+Codex-only multi-agent system for creating software.
 When you use Codex CLI with web/enterprise authentication (e.g. you ran codex login), the auth lives in Codex’s own config/session.
 Multi-agent behavior, just inside Codex CLI. This is the only option that fully works without an API key
 Codex-only multi-agent workflow (no OpenAI application programming interface key required).
@@ -58,3 +60,85 @@ check that required files exist
 if missing → run a “fixer” prompt to create/rename them
 repairs missing/incorrect filenames automatically
 includes a couple of retries (without hanging forever)
+
+
+OUTPUT GPT-5.2 Pro - FIRST OUTPUT:
+Prerequisite
+- Codex CLI is installed and authenticated (prefer ChatGPT sign-in via `codex login`; no OpenAI API key required in that mode).
+- Run inside a Git repository (Codex exec expects this by default).
+
+Goal
+Build a Codex-only, multi-run “multi-agent” software creation workflow driven by a single Python script.
+- The Python script must NOT call the OpenAI API or use any Codex SDK.
+- It must orchestrate multiple `codex exec` invocations with different role prompts (“agents”).
+- Codex should do the actual file writing inside the workspace; the Python script controls the process via gating + validation.
+
+How the Python orchestrator interacts with Codex
+- Launch `codex exec` as a subprocess.
+- Provide the prompt via stdin using `-` (read prompt from stdin) OR as a single CLI argument (choose one approach and be consistent).
+- Capture:
+  - stdout for machine-readable events via `--json` (alias: `--experimental-json`)
+  - stderr for progress logs
+- The orchestrator MAY parse JSONL only for logging/diagnostics.
+- Decision-making and gating MUST be driven by filesystem state + validators, not by interpreting natural-language output.
+
+Project outputs / required files and folders
+Codex must create and/or update:
+- REQUIREMENTS.md
+- TEST.md
+- AGENT_TASKS.md
+- directories: /design, /frontend, /backend, /tests
+(Exact filenames and paths must match; orchestrator should repair mismatches via fixer prompts.)
+
+Agent model (two-layer design)
+1) Orchestrator / PM (top-level, in Python)
+- Break the project into work items and assign them to specialist runs.
+- Enforce gating: do not proceed until required outputs pass validation.
+- Maintain determinism levers (below), retries, and safety constraints.
+
+2) Specialists (each is one `codex exec` run with a narrow role prompt)
+Suggested roster (use as needed):
+- Requirements Analyst
+- UX / Designer
+- Frontend Dev
+- Backend Dev
+- QA Tester
+- Docs Writer
+- Security Reviewer
+- Release Engineer (ensures run instructions exist)
+
+Default pipeline order (dependency-respecting)
+- PM / Requirements → Designer → Frontend → Backend → QA/Tests
+- “Parallel-ish” execution is allowed ONLY where outputs do not conflict:
+  - Run independent specialists concurrently only if they write to disjoint allowlisted paths.
+  - Otherwise run sequentially.
+
+File gating + determinism levers (implemented in Python)
+1) Validators beyond existence
+- Validate required files exist AND meet minimal content requirements (non-empty, required headings/sections, etc.).
+- Validate directory structure exists.
+
+2) Structured planning (JSON + JSON Schema)
+- When requesting structured data for downstream automation, use a JSON Schema constraint (Codex flag: `--output-schema`) and validate the final JSON artifact.
+- Treat schema outputs as optional artifacts; filesystem outputs remain the source of truth.
+
+3) Hash manifests (SHA-256)
+- Snapshot relevant inputs/outputs at each step (hash manifest) to detect unexpected changes and support reproducibility.
+
+4) Filesystem allowlists per step
+- Each specialist run has an allowlist of writable paths (e.g., Designer: /design + REQUIREMENTS.md if needed).
+- After each run, verify only allowlisted files changed; if not, fail the step and run a fixer prompt to revert/repair.
+
+Reliability pattern (important)
+- Do NOT depend on parsing the model’s natural-language text to decide what happened.
+- Tell Codex explicitly: “Write the files in the repo. Ensure exact filenames/paths.”
+- Orchestrator behavior per step:
+  1) Run codex exec with the specialist role prompt.
+  2) Run validators + allowlist diff checks.
+  3) If missing/incorrect: run a narrow “fixer” prompt to create/rename/repair.
+  4) Retry a small fixed number of times (e.g., 2) and then fail fast (never hang forever).
+
+Implementation constraints
+- Clean, readable Python.
+- No OpenAI API calls, no SDK usage; only Codex CLI subprocess calls.
+- The script should generate clear logs and keep the workflow understandable.

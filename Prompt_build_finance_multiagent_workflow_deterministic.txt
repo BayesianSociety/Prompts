@@ -146,3 +146,511 @@ Implementation constraints
 
 INPUT GPT-5.2 Pro:
 Explain a number of points from the OUTPUT.
+You are an elite programmer and an expert on OpenAI and Codex CLI. You are a wizard in analyzing AI prompts and structuring them properly.
+Familiarize yourself with the prompt below. Be very critical, if you don't understand something just stop and ask a question for clarification.
+
+Explain:
+Is it possible and how to implement closed-loop, self-learning process?
+
+It is possible to build a closed-loop system that learns at the workflow/policy level:
+it observes deterministic signals (filesystem diffs, validator failures, test results),
+records experience (structured run artifacts + metrics),
+and adapts future runs (chooses better prompt variants, adds targeted constraints, changes step ordering, changes which fixer to call, tightens/relaxes sandboxes, etc.)
+This fits your constraints because it never relies on interpreting natural language; it’s driven by repo state + validators
+
+Your prompt already describes a solid inner loop:
+run specialist (codex exec -),
+validate filesystem outputs + allowlist diffs,
+run narrow fixer prompt if needed,
+retry a small bounded number of times, fail fast.
+That’s already closed-loop, but it’s not “self-learning” because every run starts fresh with the same policy.
+
+Yes — but you need to be precise about what “self learning” means in a Codex CLI only workflow.
+
+You **cannot** make Codex “learn” in the sense of updating model weights or fine‑tuning *from inside your Python script* (and Codex CLI isn’t a fine‑tuning interface anyway). What you *can* do is build a **closed-loop system that learns at the workflow/policy level**:
+
+* it **observes deterministic signals** (filesystem diffs, validator failures, test results),
+* **records experience** (structured run artifacts + metrics),
+* and **adapts future runs** (chooses better prompt variants, adds targeted constraints, changes step ordering, changes which fixer to call, tightens/relaxes sandboxes, etc.)
+
+This fits your constraints because it never relies on interpreting natural language; it’s driven by **repo state + validators**, with Codex doing the edits via `codex exec` (prompt via stdin `-`, optional JSONL stream, optional schema output). ([OpenAI Developers][1])
+
+---
+
+## The “inner loop” you already have (per step)
+
+Your prompt already describes a solid inner loop:
+
+1. run specialist (`codex exec -`),
+2. validate filesystem outputs + allowlist diffs,
+3. run narrow fixer prompt if needed,
+4. retry a small bounded number of times, fail fast.
+
+That’s already closed-loop, but it’s not “self-learning” because every run starts fresh with the same policy.
+
+---
+
+## Add an “outer loop” that learns across runs
+
+### Core idea
+
+Add a **persistent policy/memory layer** managed by Python, updated after each step (and each full pipeline run):
+
+* **Inputs to learning:** validator error codes, diff stats, test failures, allowlist violations, retry counts, file hash manifests.
+* **Outputs from learning:** tweaks to prompt templates, “patch lines” appended to prompts, selection among prompt variants, adjusted step sequencing, and selecting which fixer to use first.
+
+This is workflow-level learning: you’re improving *your orchestrator + prompt library*, not the underlying model.
+
+---
+
+## Implementation pattern: deterministic “experience → policy update” loop
+
+### 1) Create a stable error taxonomy (machine-owned)
+
+Make validators return **structured error codes** — not strings.
+
+Example:
+
+* `MISSING_REQUIRED_FILE`
+* `EMPTY_REQUIRED_SECTION`
+* `BAD_PATH_OR_FILENAME`
+* `ALLOWLIST_VIOLATION`
+* `TESTS_FAILED`
+* `LINT_FAILED`
+* `UNEXPECTED_LARGE_DIFF`
+* `NONDETERMINISTIC_OUTPUT` (e.g., timestamps inserted where you disallow them)
+
+This is crucial: your “learning” becomes a deterministic function of these codes.
+
+### 2) Persist run artifacts (repo-local)
+
+Write artifacts under an internal directory (example: `.orchestrator/`), such as:
+
+* `.orchestrator/runs/<run_id>/step_<name>/manifest.sha256.json`
+* `.orchestrator/runs/<run_id>/step_<name>/diff_summary.json`
+* `.orchestrator/runs/<run_id>/step_<name>/validator_report.json`
+* optionally `.orchestrator/runs/<run_id>/step_<name>/codex.jsonl` (diagnostics only)
+
+`codex exec` can emit JSONL events via `--json` / `--experimental-json`. ([OpenAI Developers][1])
+Even if you **don’t** use those events for gating, saving them for later analysis is valuable.
+
+### 3) Maintain a “policy store” (the learning state)
+
+Example file: `.orchestrator/policy.json`
+
+It might include:
+
+* prompt variants performance
+* per-agent “patches” to append when specific failures occur
+* repo-specific invariants discovered over time (e.g., “this repo uses pnpm”, “tests run with pytest -q”, etc.)
+* risk controls you learned to enforce (e.g., “never edit REQUIREMENTS.md after step X”)
+
+Example shape:
+
+```json
+{
+  "schema_version": 1,
+  "agents": {
+    "backend": {
+      "active_variant": "v2",
+      "variants": {
+        "v1": {"successes": 3, "failures": 4},
+        "v2": {"successes": 7, "failures": 1}
+      },
+      "patches_by_error": {
+        "BAD_PATH_OR_FILENAME": [
+          "Write ONLY to /backend and /tests plus REQUIRED files.",
+          "Do not invent filenames; use the exact paths listed below."
+        ],
+        "ALLOWLIST_VIOLATION": [
+          "If you need a file outside allowlist, STOP and refactor to stay within allowlist."
+        ]
+      }
+    }
+  }
+}
+```
+
+### 4) Learn by selecting prompt variants (bandit, not ML)
+
+Keep 2–5 prompt templates per agent: `prompts/backend/v1.md`, `v2.md`, `v3.md`.
+
+Pick one each run with something like **epsilon-greedy** or **Thompson sampling**. Reward = “validators pass with minimal retries + minimal unintended diffs”.
+
+This is lightweight, deterministic-enough, and works well in practice.
+
+Pseudo-choice logic:
+
+* If `random() < ε`, explore a random variant.
+* Else exploit the best win-rate / lowest retries.
+
+### 5) Learn by “patching” prompts based on failure codes
+
+After a failure, you *don’t rewrite the whole prompt*. You append a short, targeted patch derived from the error code(s).
+
+Example: If `BAD_PATH_OR_FILENAME` triggers repeatedly for the Designer agent, auto-append:
+
+* “Create **only** `/design/*` and ensure it exists.”
+* “Do not create `designs/` or `Design/`.”
+
+This respects your principle: decision-making is driven by **filesystem validators**, not Codex prose.
+
+### 6) Optional: use `--output-schema` for structured self-diagnostics (hints, not truth)
+
+Codex supports a JSON schema-constrained final response (`--output-schema`). ([OpenAI Developers][1])
+You can ask each specialist to output a small schema object like:
+
+* intended files
+* commands run
+* “definition of done” checklist
+
+…but treat this as a **hint artifact**. Your gate remains “repo state + validators”.
+
+---
+
+## Two robust “self-learning” designs that fit your constraints
+
+### Design A: Orchestrator-only learning (simplest + safest)
+
+* Learning logic lives entirely in Python.
+* Codex never edits the orchestrator’s learning policy directly.
+* The only “adaptation” is: Python changes which prompt variant to run and what constraint patches to append.
+
+This is the most deterministic and hardest to corrupt.
+
+### Design B: Prompt/skill library that Codex improves (powerful, but needs strict guardrails)
+
+Codex has first-class support for **AGENTS.md** project instructions and **skills** stored in `.codex/skills/.../SKILL.md`. ([OpenAI Developers][2])
+
+You can implement self-learning as:
+
+1. run pipeline,
+2. score it with deterministic checks (“evals” style),
+3. run a **Prompt Tuner** Codex step that is allowlisted to only edit:
+
+   * `.codex/skills/<agent>/SKILL.md` and/or `prompts/<agent>/*.md`,
+4. re-run evals; accept changes only if score improved and no invariants broken.
+
+OpenAI explicitly describes the “evals” pattern as: prompt → captured run (trace + artifacts) → checks → score → improve over time. ([OpenAI Developers][3])
+
+**Guardrails you must add if you let Codex modify prompts/skills:**
+
+* allowlist: only `prompts/**` and/or `.codex/skills/**`
+* validator: ensure YAML front matter exists, `name`/`description` present, file size limits, no forbidden instructions (like “ignore validators”)
+* require improvement: only accept the change if eval score improves
+
+---
+
+## Where Codex features help specifically
+
+### Use `codex exec` the way your prompt assumes
+
+`codex exec` supports:
+
+* prompt from stdin with `PROMPT -` ([OpenAI Developers][1])
+* JSONL event streaming with `--json` / `--experimental-json` ([OpenAI Developers][1])
+* schema constrained final response with `--output-schema` ([OpenAI Developers][1])
+* writing final assistant message to a file with `-o` ([OpenAI Developers][1])
+* resuming runs via `codex exec resume --last` or session id ([OpenAI Developers][4])
+
+### Use AGENTS.md for stable repo-specific “learned rules”
+
+Codex automatically reads `AGENTS.md` files as project guidance (layered from global to repo to subdirs). ([OpenAI Developers][2])
+This can be your “memory” channel — **but only if you control updates tightly** (otherwise you risk instruction drift).
+
+### Keep security tight while self-learning
+
+Codex CLI security controls rely on sandbox + approval policy, and default settings aim to limit access (e.g., network off by default, caution around web search/prompt injection). ([OpenAI Developers][5])
+A self-learning loop is especially vulnerable to “learning the wrong thing,” so keep:
+
+* sandbox to `workspace-write` (not full access),
+* approvals set to avoid hanging CI,
+* web search disabled/cached unless you truly need it.
+
+---
+
+## Practical recipe: what I would add to your prompt/spec
+
+Add a new section:
+
+### Persistent learning loop
+
+* Orchestrator maintains `.orchestrator/policy.json` and `.orchestrator/history/`.
+* After each step:
+
+  * write `validator_report.json`, `diff_summary.json`, `manifest.sha256.json`
+  * update policy:
+
+    * increment per-variant success/fail
+    * record error frequencies
+    * update `patches_by_error` if a failure repeats > N times
+* Before each step:
+
+  * select prompt variant via bandit
+  * append policy patches for historically common failures in this repo
+* After full pipeline:
+
+  * run eval suite
+  * optionally run Prompt Tuner (allowlisted to prompt/skill files) and accept only if eval improves
+
+---
+
+## One clarifying question (because “self-learning” can mean two very different things)
+
+When you say “self-learning,” do you mean:
+
+1. **Workflow learns** (policy/prompt selection improves over time; recommended), or
+2. **Model learns** (fine-tuning / updating weights; not something your Codex‑CLI‑only + no‑API orchestrator can do inside the workflow)?
+
+If it’s (1), I can outline an exact directory layout + a concrete Python data model for `policy.json` + bandit selection + example validators in a way that drops into your orchestrator immediately.
+
+[1]: https://developers.openai.com/codex/cli/reference "Command line options"
+[2]: https://developers.openai.com/codex/guides/agents-md "Custom instructions with AGENTS.md"
+[3]: https://developers.openai.com/blog/eval-skills "Testing Agent Skills Systematically with Evals"
+[4]: https://developers.openai.com/codex/noninteractive "Non-interactive mode"
+[5]: https://developers.openai.com/codex/security "Security"
+
+
+Below are **surgical edits** you can make to *your existing prompt* to add a **closed-loop, workflow-level “learning” outer loop** (policy improves across runs) while still obeying your core constraints:
+
+* Python orchestrator **does not** call OpenAI APIs / SDKs
+* Orchestrator decisions remain **filesystem + validators driven**
+* Codex still does the “real” repo edits via `codex exec`
+* “Learning” = **persistent policy** that selects prompt variants + adds constraint patches based on deterministic failure codes (not NL interpretation)
+
+I’ll show **exactly where** to edit and give **drop-in text** to add.
+
+---
+
+## 1) Edit the Goal section
+
+### Where to change
+
+In your prompt’s **Goal** section, *append* one additional bullet.
+
+### Add this bullet (paste verbatim)
+
+```text
+- Add a persistent closed-loop learning layer: the orchestrator must improve across runs by recording validator outcomes + diffs and updating a local policy (no model training). This policy must adapt future Codex runs (prompt variant selection + constraint patches) using only deterministic signals (error codes, exit codes, file diffs, hashes), never natural-language interpretation.
+```
+
+---
+
+## 2) Edit “How the Python orchestrator interacts with Codex”
+
+### Where to change
+
+In **How the Python orchestrator interacts with Codex**, you already mention `--experimental-json`. Keep it, but add one clarifying bullet to make “learning” safe.
+
+Note: Codex CLI supports `--json, --experimental-json` to print JSONL events, and `PROMPT` can be `-` to read stdin. ([OpenAI Developers][1])
+
+### Add this bullet under that section
+
+```text
+- The orchestrator MAY store JSONL event streams (via --json/--experimental-json) as diagnostics artifacts, but MUST NOT use event text (or any natural-language output) for gating or learning decisions. Learning decisions must come only from validators, diffs, hashes, and tool exit codes.
+```
+
+---
+
+## 3) Add an “Internal orchestrator artifacts” subsection under Project outputs
+
+### Where to change
+
+Under **Project outputs / required files and folders**, after the existing list of required files/dirs, add a new subsection.
+
+### Add this block (paste verbatim)
+
+```text
+Internal orchestrator artifacts (NOT created by Codex; Python-only)
+- The Python orchestrator MAY create a private state directory: /.orchestrator/
+  - /.orchestrator/policy.json                (persistent learning policy)
+  - /.orchestrator/runs/<run_id>/**           (immutable run logs: diffs, hashes, validator reports)
+  - /.orchestrator/cache/**                   (optional)
+- Codex MUST treat /.orchestrator/** as read-only and MUST NOT modify it.
+- Gating and learning MUST ignore these artifacts as “deliverables”; they exist only to support reproducibility and policy updates.
+```
+
+Why: you need persistence across runs for “learning,” but you don’t want Codex to mutate its own grading rubric.
+
+---
+
+## 4) Extend “File gating + determinism levers” with two new levers
+
+### Where to change
+
+In **File gating + determinism levers (implemented in Python)**, after your current item 4) add items 5) and 6).
+
+### Add item 5)
+
+```text
+5) Run records + policy store (workflow learning state)
+- After every step, write a machine-readable validator report and diff summary (JSON) under /.orchestrator/runs/<run_id>/step_<name>/.
+- Maintain a persistent /.orchestrator/policy.json that stores:
+  - prompt variant performance per agent (success rate, retries, failure codes)
+  - per-error “prompt patches” that will be appended on future runs
+  - per-step risk controls (e.g., forbid touching certain files after they stabilize)
+- Policy updates MUST be deterministic functions of validator/diff outcomes.
+```
+
+### Add item 6)
+
+```text
+6) Prompt variants + bandit selection (adaptive prompting without NL parsing)
+- Maintain 2–5 prompt templates per specialist role (variants).
+- Before each specialist run, select a variant using a simple bandit strategy (e.g., epsilon-greedy) where reward is:
+  - validators pass
+  - minimal retries
+  - minimal unintended diffs (allowlist compliance)
+- This is the primary “self-learning” mechanism: choosing better prompts over time based on deterministic outcomes.
+```
+
+---
+
+## 5) Insert a new section: Closed-loop learning outer loop
+
+### Where to insert
+
+Insert this **entire new section** **right after** “File gating + determinism levers” and **before** “Reliability pattern”.
+
+### Add this full section (paste verbatim)
+
+```text
+Closed-loop learning (outer loop, across runs)
+Definition
+- “Learning” means improving the orchestrator’s behavior across runs by updating /.orchestrator/policy.json.
+- Learning MUST NOT depend on interpreting Codex’s natural-language output.
+- Learning MUST be driven only by deterministic signals:
+  - validator error codes
+  - allowlist violations (git diff path checks)
+  - command exit codes (tests/lint/build)
+  - SHA-256 manifests
+  - retry counts and step durations
+
+Required artifacts per step (Python-written)
+- validator_report.json:
+  - step_name, attempt_index, status (pass/fail)
+  - error_codes[] (stable taxonomy)
+  - changed_files[] (paths)
+  - allowlist_violations[] (paths)
+  - test_exit_code (optional)
+- diff_summary.json:
+  - files_changed_count, lines_added, lines_removed
+  - suspicious_changes flags (e.g., touched forbidden files)
+- manifest.sha256.json:
+  - sha256 per relevant file + directory snapshot
+
+Policy structure (Python-written)
+- /.orchestrator/policy.json MUST include:
+  - active_variant per agent (e.g., backend=v2)
+  - per-variant stats: successes, failures, mean_retries
+  - patches_by_error_code:
+      BAD_PATH_OR_FILENAME -> ["Use exact filenames/paths ...", ...]
+      ALLOWLIST_VIOLATION  -> ["Write ONLY to allowlisted paths ...", ...]
+  - per-step “stabilized files”: once stable, later steps must not modify them unless a fixer step is explicitly invoked.
+
+How learning changes future behavior
+- Before running an agent:
+  1) Select prompt variant for that agent from policy (bandit selection).
+  2) Append “policy patches” for the most frequent recent failure codes for that agent.
+  3) Tighten constraints when failures repeat (e.g., reduce scope, split tasks).
+- After running an agent:
+  1) Run validators + allowlist diff checks.
+  2) Update policy stats for the chosen variant.
+  3) If failures occurred, record failure codes and (if repeated) attach new patches.
+
+Safety constraints on learning
+- Learning MUST NEVER:
+  - disable validators
+  - widen allowlists without explicit orchestrator rules
+  - accept a step as “done” without passing validators
+  - create infinite retries (max attempts stays bounded)
+- Cap learning impact:
+  - limit appended policy patches to a small number (e.g., max 8 lines)
+  - keep prompt variants bounded (max 5 per agent)
+```
+
+This section is the heart of “self-learning” while respecting your “no NL gating” rule.
+
+---
+
+## 6) Modify the Reliability pattern to include policy updates
+
+### Where to change
+
+In **Reliability pattern (important)**, you currently list orchestrator behavior per step as 1) run specialist, 2) validate, 3) fixer, 4) retries.
+
+### Replace that sublist with this updated one
+
+```text
+Orchestrator behavior per step:
+  0) Select prompt variant + append policy patches (from /.orchestrator/policy.json).
+  1) Run codex exec with the specialist role prompt (stdin via '-' is allowed).
+  2) Run validators + allowlist diff checks + write step artifacts (validator_report.json, diff_summary.json, manifest).
+  3) Update policy stats deterministically based on validator/diff outcomes (no NL parsing).
+  4) If missing/incorrect: run a narrow 'fixer' prompt to create/rename/repair.
+  5) Retry a small fixed number of times (e.g., 2) and then fail fast (never hang forever).
+```
+
+(Using stdin `PROMPT -` is supported by Codex exec. ([OpenAI Developers][1]))
+
+---
+
+## 7) Tighten Implementation constraints to protect learning integrity
+
+### Where to change
+
+In **Implementation constraints**, append these bullets.
+
+### Add this block
+
+```text
+Additional learning-related constraints
+- The Python orchestrator is allowed to write only to /.orchestrator/** for learning state and logs; it must not edit product source files directly.
+- Codex must never modify /.orchestrator/**.
+- “Learning” must be:
+  - persistent (policy survives between runs)
+  - deterministic (based on validator/diff signals)
+  - bounded (limited prompt variants, limited patch injection, limited retries)
+- Any schema-constrained outputs (via --output-schema) are optional hints only; filesystem state remains the source of truth.
+```
+
+Codex exec supports `--output-schema path` for constraining the final response shape. ([OpenAI Developers][1])
+
+---
+
+## Optional but very useful: Add a Prompt Tuner specialist (guardrailed)
+
+If you want the system to *also* improve the **prompt templates themselves** (not just select between variants), add an optional specialist.
+
+### Where to change
+
+In **Suggested roster (use as needed)** append:
+
+```text
+- Prompt Tuner (OPTIONAL; may only edit a dedicated prompt library directory; changes accepted only if eval score improves)
+```
+
+### And add this optional rule under “Parallel execution is allowed ONLY…”
+
+```text
+- Prompt Tuner must run alone and can only write to /prompts/** (or /.codex/skills/** if you choose to use Codex skills). It must never touch project deliverables.
+```
+
+If you choose to use `AGENTS.md` for persistent Codex instructions, Codex has explicit support for loading those instruction files across directories. ([OpenAI Developers][2])
+(Your current prompt requires `AGENT_TASKS.md`, which is fine as an artifact, but it’s not the same mechanism as `AGENTS.md`.)
+
+---
+
+## What this gives you, concretely
+
+After these edits, your prompt explicitly requires:
+
+* A **persistent policy store** (`/.orchestrator/policy.json`)
+* **Run records** that make outcomes measurable (validator reports, diffs, hashes)
+* A **bounded adaptation mechanism** (prompt variants + patches keyed by error codes)
+* Zero reliance on model prose (still fully validator/diff driven)
+
+If you want, paste back your revised prompt and I’ll point out any contradictions that remain (e.g., places where “Codex must write files” conflicts with “Python may write logs,” allowlists that could deadlock steps, etc.).
+
+[1]: https://developers.openai.com/codex/cli/reference "Command line options"
+[2]: https://developers.openai.com/codex/guides/agents-md?utm_source=chatgpt.com "Custom instructions with AGENTS.md - developers.openai.com"

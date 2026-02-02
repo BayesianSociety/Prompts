@@ -64,20 +64,20 @@ includes a couple of retries (without hanging forever)
 
 OUTPUT GPT-5.2 Pro - FIRST OUTPUT:
 Prerequisite
-- Codex CLI is installed and authenticated (prefer ChatGPT sign-in via `codex login`; no OpenAI API key required in that mode).
+- Codex CLI is installed and authenticated (prefer ChatGPT sign-in via 'codex login'; no OpenAI API key required in that mode).
 - Run inside a Git repository (Codex exec expects this by default).
 
 Goal
-Build a Codex-only, multi-run “multi-agent” software creation workflow driven by a single Python script.
+Build a Codex-only, multi-run 'multi-agent' software creation workflow driven by a single Python script.
 - The Python script must NOT call the OpenAI API or use any Codex SDK.
-- It must orchestrate multiple `codex exec` invocations with different role prompts (“agents”).
+- It must orchestrate multiple 'codex exec' invocations with different role prompts ('agents').
 - Codex should do the actual file writing inside the workspace; the Python script controls the process via gating + validation.
 
 How the Python orchestrator interacts with Codex
-- Launch `codex exec` as a subprocess.
-- Provide the prompt via stdin using `-` (read prompt from stdin) OR as a single CLI argument (choose one approach and be consistent).
+- Launch 'codex exec' as a subprocess.
+- Provide the prompt via stdin using '-' (read prompt from stdin).
 - Capture:
-  - stdout for machine-readable events via `--json` (alias: `--experimental-json`)
+  - stdout for machine-readable events via '--experimental-json'
   - stderr for progress logs
 - The orchestrator MAY parse JSONL only for logging/diagnostics.
 - Decision-making and gating MUST be driven by filesystem state + validators, not by interpreting natural-language output.
@@ -91,12 +91,12 @@ Codex must create and/or update:
 (Exact filenames and paths must match; orchestrator should repair mismatches via fixer prompts.)
 
 Agent model (two-layer design)
-1) Orchestrator / PM (top-level, in Python)
+1) Orchestrator / Project Manager (top-level, in Python)
 - Break the project into work items and assign them to specialist runs.
 - Enforce gating: do not proceed until required outputs pass validation.
 - Maintain determinism levers (below), retries, and safety constraints.
 
-2) Specialists (each is one `codex exec` run with a narrow role prompt)
+2) Specialists (each is one 'codex exec' run with a narrow role prompt)
 Suggested roster (use as needed):
 - Requirements Analyst
 - UX / Designer
@@ -109,7 +109,7 @@ Suggested roster (use as needed):
 
 Default pipeline order (dependency-respecting)
 - PM / Requirements → Designer → Frontend → Backend → QA/Tests
-- “Parallel-ish” execution is allowed ONLY where outputs do not conflict:
+- Parallel execution is allowed ONLY where outputs do not conflict:
   - Run independent specialists concurrently only if they write to disjoint allowlisted paths.
   - Otherwise run sequentially.
 
@@ -131,14 +131,18 @@ File gating + determinism levers (implemented in Python)
 
 Reliability pattern (important)
 - Do NOT depend on parsing the model’s natural-language text to decide what happened.
-- Tell Codex explicitly: “Write the files in the repo. Ensure exact filenames/paths.”
+- Tell Codex explicitly: 'Write the files in the repo. Ensure exact filenames/paths.'
 - Orchestrator behavior per step:
   1) Run codex exec with the specialist role prompt.
   2) Run validators + allowlist diff checks.
-  3) If missing/incorrect: run a narrow “fixer” prompt to create/rename/repair.
+  3) If missing/incorrect: run a narrow 'fixer' prompt to create/rename/repair.
   4) Retry a small fixed number of times (e.g., 2) and then fail fast (never hang forever).
 
 Implementation constraints
 - Clean, readable Python.
 - No OpenAI API calls, no SDK usage; only Codex CLI subprocess calls.
 - The script should generate clear logs and keep the workflow understandable.
+
+
+INPUT GPT-5.2 Pro:
+Explain a number of points from the OUTPUT.

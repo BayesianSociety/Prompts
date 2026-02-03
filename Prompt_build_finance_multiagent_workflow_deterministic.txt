@@ -656,11 +656,17 @@ If you want, paste back your revised prompt and I’ll point out any contradicti
 [2]: https://developers.openai.com/codex/guides/agents-md?utm_source=chatgpt.com "Custom instructions with AGENTS.md - developers.openai.com"
 
 
-Below are **two fully integrated, copy‑pasteable “master prompts”**. Each one includes your **original prompt** plus the **self‑learning additions**, implemented in the two designs you specified.
+
+
+
+---------------------------------------------------------------------------------------------------------------------
+
+
+Below are **two fully integrated, copy-pasteable “master prompts”**. Each one includes your **original prompt** plus the **self‑learning additions**, implemented in the two designs you specified.
 
 ---
 
-## Version 1 — Full Integrated Prompt (Design A: Orchestrator‑only learning)
+## Version 1 — Full Integrated Prompt (Design A: Orchestrator only learning)
 
 ```text
 Prerequisite
@@ -849,6 +855,12 @@ Additional learning-related constraints (Design A)
 ```
 
 ---
+
+
+
+
+
+
 
 ## Version 2 — Full Integrated Prompt (Design B: Prompt/Skill library improved by Codex with guardrails)
 

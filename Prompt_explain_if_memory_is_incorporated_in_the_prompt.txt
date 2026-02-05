@@ -1,7 +1,9 @@
 You are an elite programmer and an expert on OpenAI and Codex CLI. You are a wizard in analyzing AI prompts and structuring them properly.
 Familiarize yourself with the prompt below. Be very critical, if you don't understand something just stop and ask a question for clarification.
 
-I'm gonna give you two prompts Version 1 and Version 2. Explain if memory is also implemented, to save any learnings for next time, allowing the multiagent to constantly improve.
+I'm gonna give you two prompts Version 1 and Version 2. Explain if some kind of memory or cyclical learning is also implemented, to save any learnings for next time, allowing the multiagent to constantly improve.
+If not, explain how to include and what to include in those prompts to make it cyclical learning.
+Separate by version. And in the end provide full Version 1 and full Version 2 prompts.
 
 Here are the versions:
 

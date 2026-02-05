@@ -404,3 +404,557 @@ Additional learning-related constraints (Design B)
 - Codex must never modify /.orchestrator/**.
 - Prompt Tuner is the ONLY Codex step permitted to edit /prompts/** and /.codex/skills/**.
 - Any schema-constrained outputs (via --output-schema) are optional hints only; filesystem state remains the source of truth.
+
+
+OUTPUT:
+## Version 1 — Is “memory / cyclical learning” implemented?
+
+Yes — **Version 1 already specifies a persistent, across-runs learning loop** (without model training) via the Python orchestrator’s state:
+
+* **Persistent memory:** `/.orchestrator/policy.json` (I strongly recommend naming it `.orchestrator/policy.json` without the leading `/`; see critique below) stores per-agent prompt variant stats, retries, failure codes, and patch rules.
+* **Closed loop:** after each Codex run → validators/diff/hashes produce deterministic outcomes → policy updates → next run selects better prompt variants + appends constraint patches.
+* **Deterministic learning signals only:** you explicitly forbid “learning” from natural-language output, and instead rely on exit codes, validator error codes, allowlist violations, diffs, hashes, and retry counts.
+
+That is exactly “cyclical learning” in the sense of *run → evaluate → update policy → run again with improved controls*.
+
+### Critical issues / ambiguity in Version 1 (what could silently break the “learning”)
+
+These are the biggest problems I see:
+
+1. **Leading slashes are dangerous / ambiguous**
+   You repeatedly use paths like `/design`, `/.orchestrator/…`. In many tools, a leading `/` means *filesystem root*, not *repo root*.
+   If Codex or your Python script interprets those literally, you risk writes outside the repo (or failures inside sandboxes).
+   **Fix:** explicitly define “repo-root paths” and use `design/`, `.orchestrator/`, etc.
+
+2. **“Attach new patches” conflicts with “no NL interpretation”**
+   You say the policy stores `patches_by_error_code`, and later: “(if repeated) attach new patches.”
+   But where do those “new patches” come from if you **refuse natural-language interpretation** and don’t want Codex editing policy?
+
+* If patches are **pre-authored** (a fixed catalog keyed by error code) → good/deterministic.
+* If patches are **generated** dynamically → that usually requires either NL reasoning or model output interpretation (violates your constraint).
+
+**Fix:** make it explicit that patches come from a **static, predefined patch catalog**, and the orchestrator “learns” only by **selecting** which patch(es) to apply based on deterministic stats.
+
+3. **You want Codex to write files, but you don’t specify the sandbox/automation mode**
+   By default, `codex exec` is typically constrained (commonly read-only unless configured). You should specify that the orchestrator runs `codex exec` with `--full-auto` (or `--sandbox workspace-write`) when you *want Codex to edit the repo*. ([OpenAI Developers][1])
+
+4. **You “ignore changes under /.orchestrator/** in allowlist checks”**
+   If you ignore `.orchestrator/**` entirely, Codex could maliciously/accidentally edit policy/logs and you’d never detect it.
+   **Fix:** do allowlist checks in the right order:
+
+* compute repo diff **immediately after Codex completes**
+* only then write `.orchestrator/...` artifacts
+* and treat `.orchestrator/**` as **forbidden for Codex steps** (must be unchanged during Codex runs)
+
+5. **Epsilon-greedy isn’t deterministic unless you seed it**
+   You say policy updates must be deterministic. But epsilon-greedy has randomness unless you seed it.
+   **Fix:** store a `rng_seed` in policy and use a deterministic PRNG.
+
+### If you wanted even *more* cyclical learning in Version 1 (still deterministic)
+
+You already have the core loop. To make it reliably improve over time, add:
+
+* **Policy schema + migration version** (so policy won’t corrupt on upgrades)
+* **A fixed patch catalog** (error-code → patch candidates)
+* **Deterministic selection logic** for:
+
+  * variant choice
+  * which patches to apply (top-K by recent failure frequency, capped)
+* **Replayable step fingerprints** (hash of inputs / allowlist / prompt variant ID) so you can attribute outcomes cleanly
+
+---
+
+## Version 2 — Is “memory / cyclical learning” implemented?
+
+Yes — Version 2 includes **two** cyclical learning loops:
+
+### A) Orchestrator policy learning (same as Version 1)
+
+Same `.orchestrator/policy.json` concept, same deterministic signals.
+
+### B) “Evals-style” prompt/skill improvement loop (Design B)
+
+You explicitly add an inner loop:
+
+1. run pipeline → score deterministically → persist baseline
+2. run “Prompt Tuner” → allow edits only in prompt/skill library
+3. re-run failing steps or pipeline → re-score
+4. accept changes **only if score strictly improves** and invariants hold
+
+That is cyclical learning with regression testing.
+
+### Critical issues / mismatch in Version 2 (important)
+
+1. **Your skills path is probably wrong**
+   You propose `/.codex/skills/**`. Codex’s documented repo-scoped skills location is `.agents/skills/` (and each skill uses a `SKILL.md` with YAML front matter containing `name` and `description`). ([OpenAI Developers][2])
+   So if you want Codex to actually *load* and use those skills, you should use:
+
+* `.agents/skills/<skill>/SKILL.md`
+
+2. **If you meant “Codex prompts”, note that custom prompts are deprecated**
+   Codex supports “custom prompts” in `~/.codex/prompts`, but the docs state they’re **deprecated in favor of skills**. ([OpenAI Developers][3])
+   Your `/prompts/**` directory is fine as an **orchestrator-owned prompt template library** (files that Python reads and feeds to `codex exec`) — just don’t assume Codex will auto-load it as a native feature.
+
+3. **AGENTS.md is real and powerful, but it’s not a skill library**
+   Codex reads `AGENTS.md` automatically as project guidance, with a defined discovery/precedence chain and max-bytes cap. ([OpenAI Developers][4])
+   Your “stabilize AGENTS.md after bootstrap” rule is a good guardrail.
+
+4. **Overfitting risk**
+   If you accept prompt/skill changes based on a single run’s eval score, you can overfit to that run.
+   Deterministic fix: evaluate on **multiple stored eval cases** (e.g., last N failing step scenarios) and accept only if aggregate score improves and no regressions.
+
+---
+
+# Full Version 1 prompt (revised to make cyclical learning unambiguous + deterministic)
+
+```text
+## Version 1 — Full Integrated Prompt (Design A: Orchestrator only learning)
+
+Prerequisite
+- Codex CLI is installed and authenticated (prefer ChatGPT sign-in via `codex login`; no OpenAI API key required in that mode).
+- Run inside a Git repository (Codex exec checks this by default; the orchestrator should fail fast if no repo is detected).
+
+Path conventions (IMPORTANT)
+- All paths in this spec are REPO-ROOT RELATIVE.
+- When this spec writes paths like `design/` or `.orchestrator/`, it means `<repo_root>/design/` and `<repo_root>/.orchestrator/`.
+- Do NOT use filesystem-absolute paths like `/design` or `/.orchestrator` in implementation.
+
+Goal
+Build a Codex-only, multi-run “multi-agent” software creation workflow driven by a single Python script.
+- The Python script must NOT call the OpenAI API or use any Codex SDK.
+- It must orchestrate multiple `codex exec` invocations with different role prompts (“agents”).
+- Codex should do the actual file writing inside the workspace; the Python script controls the process via gating + validation.
+- Add a persistent closed-loop learning layer:
+  - The orchestrator must improve across runs by recording validator outcomes + diffs and updating a local policy (no model training).
+  - This policy must adapt future Codex runs (prompt variant selection + constraint patches) using only deterministic signals (error codes, exit codes, file diffs, hashes), never natural-language interpretation.
+
+How the Python orchestrator interacts with Codex
+- Launch `codex exec` as a subprocess.
+- Provide the prompt via stdin using `-` (read prompt from stdin).
+- The orchestrator MUST run Codex in a mode that allows writing when the step requires edits (e.g., `--full-auto` or `--sandbox workspace-write`).
+- Capture:
+  - stdout for machine-readable events via `--json` (alias `--experimental-json`)
+  - stderr for progress logs
+- The orchestrator MAY parse JSONL only for logging/diagnostics.
+- Decision-making and gating MUST be driven by filesystem state + validators, not by interpreting natural-language output.
+- The orchestrator MAY store JSONL event streams as diagnostics artifacts, but MUST NOT use event text (or any natural-language output) for gating or learning decisions.
+- Learning decisions must come only from validators, diffs, hashes, and tool exit codes.
+
+Project outputs / required files and folders (Codex-written deliverables)
+Codex must create and/or update:
+- REQUIREMENTS.md
+- TEST.md
+- AGENT_TASKS.md
+- directories: design/, frontend/, backend/, tests/
+(Exact filenames and paths must match; orchestrator should repair mismatches via fixer prompts.)
+
+Internal orchestrator artifacts (Python-only; not product deliverables)
+- The Python orchestrator MAY create and maintain a private state directory: `.orchestrator/`
+  - .orchestrator/policy.json              (persistent learning policy)
+  - .orchestrator/runs/<run_id>/**         (immutable run logs: diffs, hashes, validator reports)
+  - .orchestrator/cache/**                 (optional)
+- Codex MUST treat `.orchestrator/**` as read-only during specialist steps and MUST NOT modify it.
+- Enforcement requirement:
+  - The orchestrator MUST snapshot hashes of `.orchestrator/**` BEFORE a Codex run and verify unchanged AFTER the Codex run (before writing any new orchestrator artifacts).
+  - Only after that check passes may Python write new artifacts into `.orchestrator/**`.
+
+Agent model (two-layer design)
+1) Orchestrator / Project Manager (top-level, in Python)
+- Break the project into work items and assign them to specialist runs.
+- Enforce gating: do not proceed until required outputs pass validation.
+- Maintain determinism levers (below), retries, and safety constraints.
+- Implement workflow learning (Design A): all learning logic lives in Python; Codex never edits the learning policy.
+  - Adaptation occurs only via Python selecting prompt variants and appending constraint patches.
+
+2) Specialists (each is one `codex exec` run with a narrow role prompt)
+Suggested roster (use as needed):
+- Requirements Analyst
+- UX / Designer
+- Frontend Dev
+- Backend Dev
+- QA Tester
+- Docs Writer
+- Security Reviewer
+- Release Engineer (ensures run instructions exist)
+
+Default pipeline order (dependency-respecting)
+- PM / Requirements → Designer → Frontend → Backend → QA/Tests
+- Parallel execution is allowed ONLY where outputs do not conflict:
+  - Run independent specialists concurrently only if they write to disjoint allowlisted paths.
+  - Otherwise run sequentially.
+
+File gating + determinism levers (implemented in Python)
+1) Validators beyond existence
+- Validate required files exist AND meet minimal content requirements (non-empty, required headings/sections, etc.).
+- Validate directory structure exists.
+
+2) Structured planning (JSON + JSON Schema)
+- When requesting structured data for downstream automation, use a JSON Schema constraint (`codex exec --output-schema <schema.json>`) and validate the final JSON artifact.
+- Treat schema outputs as optional artifacts; filesystem outputs remain the source of truth.
+
+3) Hash manifests (SHA-256)
+- Snapshot relevant inputs/outputs at each step (hash manifest) to detect unexpected changes and support reproducibility.
+
+4) Filesystem allowlists per step
+- Each specialist run has an allowlist of writable paths (e.g., Designer: design/ plus REQUIREMENTS.md if needed).
+- After each Codex run, verify only allowlisted files changed; if not, fail the step and run a fixer prompt to revert/repair.
+
+5) Run records + policy store (workflow learning state)
+- After every step, write a machine-readable validator report and diff summary (JSON) under `.orchestrator/runs/<run_id>/step_<name>/`.
+- Maintain a persistent `.orchestrator/policy.json` that stores:
+  - prompt variant performance per agent (success rate, retries, failure codes)
+  - per-error “prompt patches” that will be appended on future runs
+  - per-step risk controls (e.g., forbid touching certain files after they stabilize)
+  - rng_seed for deterministic bandit decisions
+- Policy updates MUST be deterministic functions of validator/diff outcomes (no NL parsing).
+
+6) Prompt variants + bandit selection (adaptive prompting without NL parsing)
+- Maintain 2–5 prompt templates per specialist role (variants), either embedded in Python or stored in repo under `prompt_variants/<agent>/`.
+- Before each specialist run, select a variant using a simple bandit strategy (e.g., epsilon-greedy) where reward is:
+  - validators pass
+  - minimal retries
+  - minimal unintended diffs (allowlist compliance)
+- Determinism requirement:
+  - Use a PRNG seeded from policy.json (rng_seed) so variant selection is reproducible given the same policy state.
+
+Closed-loop learning (outer loop, across runs) — Design A
+Definition
+- “Learning” means improving the orchestrator’s behavior across runs by updating `.orchestrator/policy.json`.
+- Learning MUST NOT depend on interpreting Codex’s natural-language output.
+- Learning MUST be driven only by deterministic signals:
+  - validator error codes
+  - allowlist violations (git diff path checks)
+  - command exit codes (tests/lint/build)
+  - SHA-256 manifests
+  - retry counts and step durations
+
+Required artifacts per step (Python-written)
+- validator_report.json:
+  - step_name, attempt_index, status (pass/fail)
+  - error_codes[] (stable taxonomy)
+  - changed_files[] (paths)
+  - allowlist_violations[] (paths)
+  - test_exit_code (optional)
+- diff_summary.json:
+  - files_changed_count, lines_added, lines_removed
+  - suspicious_changes flags (e.g., touched forbidden files)
+- manifest.sha256.json:
+  - sha256 per relevant file + directory snapshot
+
+Error taxonomy (stable, machine-owned)
+- Validators MUST emit stable error codes (examples):
+  - MISSING_REQUIRED_FILE
+  - MISSING_REQUIRED_DIRECTORY
+  - BAD_PATH_OR_FILENAME
+  - EMPTY_REQUIRED_SECTION
+  - INVALID_HEADINGS
+  - ALLOWLIST_VIOLATION
+  - TESTS_FAILED
+  - LINT_FAILED
+  - UNEXPECTED_LARGE_DIFF
+
+Policy patches MUST be deterministic (no on-the-fly invention)
+- The orchestrator MUST ship a fixed patch catalog in code (or a static JSON file), e.g.:
+  - BAD_PATH_OR_FILENAME -> [patch_1, patch_2]
+  - ALLOWLIST_VIOLATION  -> [patch_1, patch_2]
+- policy.json stores only:
+  - which patch IDs are active per agent/error code
+  - statistics about which patch IDs improved outcomes
+- The orchestrator may activate/deactivate patches based on deterministic stats, but MUST NOT generate new patch text dynamically.
+
+Policy structure (Python-written)
+- `.orchestrator/policy.json` MUST include:
+  - schema_version
+  - rng_seed
+  - active_variant per agent (e.g., backend=v2)
+  - per-variant stats: successes, failures, mean_retries
+  - patches_by_error_code (by patch ID, not newly invented strings)
+  - per-step “stabilized files”: once stable, later steps must not modify them unless a fixer step is explicitly invoked.
+
+How learning changes future behavior
+- Before running an agent:
+  1) Select prompt variant for that agent from policy (bandit selection).
+  2) Append policy patches for the most frequent recent failure codes for that agent.
+  3) Tighten constraints when failures repeat (e.g., reduce scope, split tasks).
+- After running an agent:
+  1) Run validators + allowlist diff checks.
+  2) Update policy stats for the chosen variant.
+  3) If failures occurred, record failure codes and update patch activation stats deterministically.
+
+Safety constraints on learning
+- Learning MUST NEVER:
+  - disable validators
+  - widen allowlists without explicit orchestrator rules
+  - accept a step as “done” without passing validators
+  - create infinite retries (max attempts stays bounded)
+- Cap learning impact:
+  - limit appended policy patches to a small number (e.g., max 8 lines)
+  - keep prompt variants bounded (max 5 per agent)
+
+Reliability pattern (important)
+- Do NOT depend on parsing the model’s natural-language text to decide what happened.
+- Tell Codex explicitly: “Write the files in the repo. Ensure exact filenames/paths.”
+- Orchestrator behavior per step:
+  0) Select prompt variant + append policy patches (from `.orchestrator/policy.json`).
+  1) Run `codex exec` with the specialist role prompt.
+  2) Run validators + allowlist diff checks + write step artifacts (validator_report.json, diff_summary.json, manifest).
+  3) Update policy stats deterministically based on validator/diff outcomes (no NL parsing).
+  4) If missing/incorrect: run a narrow “fixer” prompt to create/rename/repair.
+  5) Retry a small fixed number of times (e.g., 2) and then fail fast.
+
+Implementation constraints
+- Clean, readable Python.
+- No OpenAI API calls, no SDK usage; only Codex CLI subprocess calls.
+- The script should generate clear logs and keep the workflow understandable.
+
+Additional learning-related constraints (Design A)
+- The Python orchestrator is allowed to write only to `.orchestrator/**` for learning state and logs; it must not edit product source files directly (except via safe revert mechanisms like `git restore` when enforcing allowlists).
+- Codex must never modify `.orchestrator/**` during specialist steps.
+- “Learning” must be:
+  - persistent (policy survives between runs)
+  - deterministic (based on validator/diff signals)
+  - bounded (limited prompt variants, limited patch injection, limited retries)
+- Any schema-constrained outputs (via --output-schema) are optional hints only; filesystem state remains the source of truth.
+```
+
+---
+
+# Full Version 2 prompt (revised to match Codex skills + make cyclical learning robust)
+
+```text
+## Version 2 — Full Integrated Prompt (Design B: Prompt/Skill library improved by Codex with guardrails)
+
+Prerequisite
+- Codex CLI is installed and authenticated (prefer ChatGPT sign-in via `codex login`; no OpenAI API key required in that mode).
+- Run inside a Git repository (Codex exec checks this by default; the orchestrator should fail fast if no repo is detected).
+
+Path conventions (IMPORTANT)
+- All paths in this spec are REPO-ROOT RELATIVE (e.g., `design/`, `.orchestrator/`).
+- Do NOT use filesystem-absolute paths like `/design` or `/.orchestrator` in implementation.
+
+Goal
+Build a Codex-only, multi-run “multi-agent” software creation workflow driven by a single Python script.
+- The Python script must NOT call the OpenAI API or use any Codex SDK.
+- It must orchestrate multiple `codex exec` invocations with different role prompts (“agents”).
+- Codex should do the actual file writing inside the workspace; the Python script controls the process via gating + validation.
+- Add a persistent closed-loop learning layer: the orchestrator must improve across runs by recording validator outcomes + diffs and updating a local policy (no model training). This policy must adapt future Codex runs (prompt variant selection + constraint patches) using only deterministic signals (error codes, exit codes, file diffs, hashes), never natural-language interpretation.
+- Design B learning:
+  - In addition to orchestrator policy updates, add an evals-style loop where Codex is allowed (under strict allowlists) to improve:
+    - an orchestrator-owned prompt template library in `prompts/**` (these are files the Python orchestrator reads and feeds to `codex exec`)
+    - a Codex skill library in `.agents/skills/**` (repo-scoped skills)
+  - Changes are accepted only if deterministic eval score improves and invariants remain intact.
+
+How the Python orchestrator interacts with Codex
+- Launch `codex exec` as a subprocess.
+- Provide the prompt via stdin using `-` (read prompt from stdin).
+- The orchestrator MUST run Codex in a mode that allows writing when the step requires edits (e.g., `--full-auto` or `--sandbox workspace-write`).
+- Capture:
+  - stdout for machine-readable events via `--json` (alias `--experimental-json`)
+  - stderr for progress logs
+- The orchestrator MAY parse JSONL only for logging/diagnostics.
+- Decision-making and gating MUST be driven by filesystem state + validators, not by interpreting natural-language output.
+- The orchestrator MAY store JSONL event streams as diagnostics artifacts, but MUST NOT use event text (or any natural-language output) for gating or learning decisions. Learning decisions must come only from validators, diffs, hashes, and tool exit codes.
+
+Project outputs / required files and folders (Codex-written deliverables)
+Codex must create and/or update:
+- REQUIREMENTS.md
+- TEST.md
+- AGENT_TASKS.md
+- directories: design/, frontend/, backend/, tests/
+(Exact filenames and paths must match; orchestrator should repair mismatches via fixer prompts.)
+
+Additional learning-support files/folders (Design B)
+Codex must create and/or update:
+- AGENTS.md (repo-root; stable project instructions for Codex runs; becomes “stabilized” after bootstrap)
+- directories:
+  - prompts/                 (prompt templates/variants; editable ONLY by Prompt Tuner step)
+  - .agents/skills/          (Codex skill library; editable ONLY by Prompt Tuner step)
+(Exact filenames and paths must match; orchestrator should repair mismatches via fixer prompts.)
+
+Internal orchestrator artifacts (Python-only; not product deliverables)
+- The Python orchestrator MAY create and maintain a private state directory: `.orchestrator/`
+  - .orchestrator/policy.json                (persistent learning policy)
+  - .orchestrator/runs/<run_id>/**           (immutable run logs: diffs, hashes, validator reports)
+  - .orchestrator/evals/<run_id>.json        (deterministic eval scores/breakdowns)
+  - .orchestrator/cache/**                   (optional)
+- Codex MUST treat `.orchestrator/**` as read-only and MUST NOT modify it.
+- Enforcement requirement:
+  - The orchestrator MUST snapshot hashes of `.orchestrator/**` BEFORE a Codex run and verify unchanged AFTER the Codex run (before writing any new orchestrator artifacts).
+  - Only after that check passes may Python write new artifacts into `.orchestrator/**`.
+
+Agent model (two-layer design)
+1) Orchestrator / Project Manager (top-level, in Python)
+- Break the project into work items and assign them to specialist runs.
+- Enforce gating: do not proceed until required outputs pass validation.
+- Maintain determinism levers (below), retries, and safety constraints.
+- Implement workflow learning:
+  - Always: orchestrator-only learning via `.orchestrator/policy.json` (variant selection + patches).
+  - Additionally (Design B): an evals-style improvement loop for `prompts/**` and `.agents/skills/**` with strict guardrails and “accept only if score improves”.
+
+2) Specialists (each is one `codex exec` run with a narrow role prompt)
+Suggested roster (use as needed):
+- Requirements Analyst
+- UX / Designer
+- Frontend Dev
+- Backend Dev
+- QA Tester
+- Docs Writer
+- Security Reviewer
+- Release Engineer (ensures run instructions exist)
+- Prompt Tuner (Design B only; may edit ONLY `prompts/**` and `.agents/skills/**`; changes accepted only if eval improves)
+
+Default pipeline order (dependency-respecting)
+- PM / Requirements → Designer → Frontend → Backend → QA/Tests
+- Parallel execution is allowed ONLY where outputs do not conflict:
+  - Run independent specialists concurrently only if they write to disjoint allowlisted paths.
+  - Otherwise run sequentially.
+- Prompt Tuner must run alone (never parallel) and can only write to `prompts/**` and `.agents/skills/**`.
+
+File gating + determinism levers (implemented in Python)
+1) Validators beyond existence
+- Validate required files exist AND meet minimal content requirements (non-empty, required headings/sections, etc.).
+- Validate directory structure exists.
+
+2) Structured planning (JSON + JSON Schema)
+- When requesting structured data for downstream automation, use a JSON Schema constraint (`codex exec --output-schema <schema.json>`) and validate the final JSON artifact.
+- Treat schema outputs as optional artifacts; filesystem outputs remain the source of truth.
+
+3) Hash manifests (SHA-256)
+- Snapshot relevant inputs/outputs at each step (hash manifest) to detect unexpected changes and support reproducibility.
+
+4) Filesystem allowlists per step
+- Each specialist run has an allowlist of writable paths (e.g., Designer: design/ plus REQUIREMENTS.md if needed).
+- After each run, verify only allowlisted files changed; if not, fail the step and run a fixer prompt to revert/repair.
+
+5) Run records + policy store (workflow learning state)
+- After every step, write a machine-readable validator report and diff summary (JSON) under `.orchestrator/runs/<run_id>/step_<name>/`.
+- Maintain a persistent `.orchestrator/policy.json` that stores:
+  - prompt variant performance per agent (success rate, retries, failure codes)
+  - per-error “prompt patches” that will be appended on future runs
+  - per-step risk controls (e.g., forbid touching certain files after they stabilize)
+  - rng_seed for deterministic bandit decisions
+- Policy updates MUST be deterministic functions of validator/diff outcomes (no NL parsing).
+
+6) Prompt variants + bandit selection (adaptive prompting without NL parsing)
+- Maintain 2–5 prompt templates per specialist role (variants) in `prompts/<agent>/`.
+- Before each specialist run, select a variant using a simple bandit strategy (e.g., epsilon-greedy) where reward is:
+  - validators pass
+  - minimal retries
+  - minimal unintended diffs (allowlist compliance)
+- Determinism requirement:
+  - Use a PRNG seeded from policy.json (rng_seed) so variant selection is reproducible given the same policy state.
+
+7) Evals-style scoring (Design B)
+- After completing the main pipeline (and after any retries/fixers), compute a deterministic eval score and breakdown.
+- Store results in `.orchestrator/evals/<run_id>.json`.
+- Score MUST be computed only from deterministic checks:
+  - required files/dirs exist and pass validators
+  - allowlist violations count (must be 0)
+  - tests pass (exit code 0) and/or required test commands succeed
+  - no forbidden paths touched
+  - minimal retry counts (optional penalty)
+- Evals MUST NOT use natural-language interpretation.
+
+Closed-loop learning (outer loop, across runs) — Design B
+Definition
+- “Learning” includes:
+  A) Orchestrator policy learning (always): update `.orchestrator/policy.json` based on deterministic outcomes.
+  B) Prompt/skill library improvement (Design B): allow Codex to modify `prompts/**` and `.agents/skills/**` under strict guardrails, accepted only if eval score improves.
+
+Orchestrator-only learning (A) — deterministic and bounded
+- Driven only by: validator error codes, allowlist violations, exit codes, SHA-256 manifests, retry counts.
+- Policy changes: variant selection + append patches, deterministic and bounded.
+- Policy patches MUST be deterministic:
+  - The orchestrator MUST ship a fixed patch catalog (in code or static JSON).
+  - policy.json stores only which patch IDs are active; it does not store newly invented patch text.
+
+Prompt/skill library learning (B) — evals loop
+High-level loop (must be implemented by the Python orchestrator)
+1) Run pipeline (specialists + fixers) normally using current prompts/skills.
+2) Compute deterministic eval score; persist baseline score + artifacts.
+3) Run Prompt Tuner (one `codex exec` run) with allowlist restricted to:
+   - prompts/**
+   - .agents/skills/**
+4) Validate Prompt Tuner changes with deterministic guardrails (below).
+5) Re-run deterministic eval scoring in a controlled regression:
+   - Option 1 (preferred): re-run only the previously failing step(s) using the tuned prompts/skills, then re-score.
+   - Option 2: re-run the full pipeline if feasible, then re-score.
+   - Anti-overfitting requirement (deterministic):
+     - Also re-score against the last N stored eval breakdowns (e.g., replay failing steps in clean git worktrees if supported),
+       and accept only if aggregate score improves and no regressions occur.
+6) Accept prompt/skill changes ONLY IF:
+   - tuned_score > baseline_score (strict improvement)
+   - AND invariants are intact (no allowlist violations, forbidden instructions absent, schema/validators pass)
+   - otherwise revert prompt/skill changes (e.g., `git restore prompts .agents/skills`) and keep baseline prompts/skills.
+
+Prompt Tuner allowlist (hard requirement)
+- Prompt Tuner may ONLY write to:
+  - prompts/**
+  - .agents/skills/**
+- Any change outside these paths is an immediate failure and must be reverted.
+
+Prompt/skill validators (hard requirements)
+- For `.agents/skills/<skill>/SKILL.md`, enforce:
+  - YAML front matter exists
+  - required keys: name, description
+  - max file size limit (define a concrete limit, e.g., 64 KB)
+  - forbidden instructions are not present (examples):
+    - “ignore validators”
+    - “bypass allowlists”
+    - “write outside allowed paths”
+    - “mark step as done even if tests fail”
+- For `prompts/**` templates, enforce:
+  - max file size limit (define a concrete limit, e.g., 64 KB)
+  - forbidden instructions not present (same list)
+  - no instructions that contradict gating (“proceed even if validators fail”, etc.)
+
+Stabilization rules (Design B)
+- AGENTS.md is created/bootstrapped early (by PM or Release Engineer step) and then becomes stabilized:
+  - no specialist step may modify AGENTS.md after bootstrap
+  - Prompt Tuner may not modify AGENTS.md (only prompts/ and .agents/skills/ are editable by tuner)
+
+Safety constraints on learning
+- Learning MUST NEVER:
+  - disable validators
+  - widen allowlists without explicit orchestrator rules
+  - accept a step as “done” without passing validators
+  - create infinite retries (max attempts stays bounded)
+- Cap learning impact:
+  - limit appended policy patches (e.g., max 8 lines)
+  - keep prompt variants bounded (max 5 per agent)
+  - prompt/skill changes only accepted with strict score improvement
+
+Reliability pattern (important)
+- Do NOT depend on parsing the model’s natural-language text to decide what happened.
+- Tell Codex explicitly: “Write the files in the repo. Ensure exact filenames/paths.”
+- Orchestrator behavior per step:
+  0) Select prompt variant + append policy patches (from `.orchestrator/policy.json`).
+  1) Run `codex exec` with the specialist role prompt.
+  2) Run validators + allowlist diff checks + write step artifacts (validator_report.json, diff_summary.json, manifest).
+  3) Update policy stats deterministically based on validator/diff outcomes (no NL parsing).
+  4) If missing/incorrect: run a narrow “fixer” prompt to create/rename/repair.
+  5) Retry a small fixed number of times (e.g., 2) and then fail fast.
+- After full pipeline completion:
+  6) Compute deterministic eval score; persist it.
+  7) (Design B only) Optionally run Prompt Tuner loop and accept changes only if score improves, else revert.
+
+Implementation constraints
+- Clean, readable Python.
+- No OpenAI API calls, no SDK usage; only Codex CLI subprocess calls.
+- The script should generate clear logs and keep the workflow understandable.
+
+Additional learning-related constraints (Design B)
+- The Python orchestrator is allowed to write only to `.orchestrator/**` for learning state and logs; it must not edit product source files directly (except via safe revert mechanisms like `git restore` when enforcing allowlists).
+- Codex must never modify `.orchestrator/**`.
+- Prompt Tuner is the ONLY Codex step permitted to edit `prompts/**` and `.agents/skills/**`.
+- Any schema-constrained outputs (via --output-schema) are optional hints only; filesystem state remains the source of truth.
+```
+
+---
+
+If you tell me **whether you intended `/prompts/**` to be (A) just an orchestrator-owned folder of prompt templates or (B) something Codex should auto-load as a native prompt feature**, I can tighten Version 2 even further (because “native prompts” and “skills” have different discovery rules).
+
+[1]: https://developers.openai.com/codex/cli/reference "Command line options"
+[2]: https://developers.openai.com/codex/skills "Agent Skills"
+[3]: https://developers.openai.com/codex/custom-prompts "Custom Prompts"
+[4]: https://developers.openai.com/codex/guides/agents-md "Custom instructions with AGENTS.md"

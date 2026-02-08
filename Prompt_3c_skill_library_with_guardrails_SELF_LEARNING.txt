@@ -1,0 +1,388 @@
+## Version 3 — Hardened Integrated Prompt with Explicit Design A vs Design B Sections
+## (Repo-resident orchestrator state; deterministic gating; deterministic variant selection)
+
+This specification is split into:
+- [Design A] Core workflow + orchestrator-only learning. (Required in both A and B.)
+- [Design B] Adds an eval-gated loop where Codex may improve a prompt/skill library. (Optional extension; only in B.)
+
+If running Design B, ALL Design A requirements still apply unless explicitly overridden.
+
+----------------------------------------------------------------------
+[Design A] Prerequisites (hard requirements)
+- Codex CLI is installed and authenticated.
+- Run inside a Git repository.
+- Python 3.11+ available.
+- OS supports subprocess execution.
+
+[Design A] Compatibility note (no pretending)
+- This workflow may reference optional Codex flags such as:
+  - --experimental-json (JSONL event stream)
+  - --output-schema (schema-constrained output)
+- The orchestrator MUST implement feature detection:
+  - deterministically invoke `codex exec --help` and check for flag presence (string match)
+  - if unsupported, proceed without them and record that they were unavailable
+- Regardless of flag support, gating/learning MUST use filesystem + validators + exit codes only.
+
+----------------------------------------------------------------------
+[Design A] Goal
+Build a Codex-only, multi-run “multi-agent” software creation workflow driven by a single Python script.
+
+[Design A] Hard constraints
+- The Python orchestrator must NOT call the OpenAI API and must NOT use any Codex SDK.
+- The orchestrator MUST orchestrate multiple `codex exec` subprocess runs with different role prompts (“agents”).
+- Codex does the actual file writing inside the repo; Python controls progression via gating + validation.
+- Decision-making MUST NOT depend on natural-language interpretation of Codex output.
+
+----------------------------------------------------------------------
+[Design A] Required project outputs (Codex-authored)
+Codex MUST create/update these exact paths (case-sensitive):
+- REQUIREMENTS.md
+- TEST.md
+- AGENT_TASKS.md
+- directories: /design, /frontend, /backend, /tests
+
+[Design B] Additional required outputs (Codex-authored)
+Codex MUST additionally create/update:
+- AGENTS.md (repo-root; stabilized after bootstrap)
+- directories:
+  - /prompts              (prompt templates/variants; editable ONLY by Prompt Library Bootstrap or Prompt Tuner)
+  - /.codex/skills        (skill library; editable ONLY by Prompt Library Bootstrap or Prompt Tuner)
+
+----------------------------------------------------------------------
+[Design A] Orchestrator private state (Python-authored only; in-repo; NOT product deliverables)
+- The Python orchestrator MAY create and maintain: /.orchestrator/
+  - /.orchestrator/policy.json
+  - /.orchestrator/runs/<run_id>/**   (immutable run logs: manifests, diffs, validator reports)
+  - /.orchestrator/evals/<run_id>.json (optional in A; required in B)
+  - /.orchestrator/cache/** (optional)
+- Codex MUST NEVER modify anything under /.orchestrator/** (hard invariant).
+
+[Design A] Non-negotiable invariants (hard-fail if violated)
+1) Codex may not modify /.orchestrator/** at any time.
+2) Codex may not modify .git/** at any time.
+3) Each step must only modify allowlisted paths for that step.
+4) If allowlist violation occurs: step fails and changes are reverted deterministically.
+5) A step may be marked successful only if all validators for that step pass.
+6) Retries are bounded: max_attempts_per_step = 3 (1 initial + up to 2 retries). No infinite loops.
+
+[Design B] Additional invariants
+7) Prompt Library Bootstrap / Prompt Tuner may ONLY modify /prompts/** and /.codex/skills/** (and nothing else).
+8) After bootstrap, AGENTS.md is LOCKED:
+   - no specialist may modify AGENTS.md
+   - Prompt Tuner may not modify AGENTS.md
+
+----------------------------------------------------------------------
+[Design A] Boundary Enforcement (do NOT skip; closes the trust gap)
+The orchestrator MUST NOT “ignore diffs under /.orchestrator/**”.
+
+Instead it MUST enforce “Codex run windows”:
+- Before launching codex exec:
+  - capture PRE snapshot hashes for:
+    - all tracked repo files AND all files under /.orchestrator/** (minimum)
+  - (optional extra) chmod /.orchestrator/** to read-only on POSIX
+- Run codex exec.
+- Immediately after codex returns (BEFORE orchestrator writes any logs/policy):
+  - capture POST snapshot hashes
+  - compute changed paths
+  - enforce forbidden paths + allowlists + caps
+- Only AFTER gating/reverts are complete may the orchestrator write under /.orchestrator/**.
+- If /.orchestrator/** changed during a Codex run window: hard-fail and revert.
+
+----------------------------------------------------------------------
+[Design A] Agent model
+1) Orchestrator / Project Manager (Python)
+- Break work into steps, run specialists, enforce gating, manage retries.
+- Maintain deterministic learning state in /.orchestrator/policy.json.
+
+2) Specialists (each is one `codex exec` run)
+Suggested roles:
+- Requirements Analyst
+- UX / Designer
+- Frontend Dev
+- Backend Dev
+- QA Tester
+- Docs Writer
+- Security Reviewer (optional)
+- Release Engineer (recommended)
+
+[Design B] Additional specialist
+- Prompt Tuner (Design B only; may edit ONLY /prompts/** and /.codex/skills/**; accepted only if deterministic score improves)
+
+----------------------------------------------------------------------
+[Design A] Default pipeline order
+0) Release Engineer (bootstrap repo structure and run instructions)
+1) Requirements Analyst
+2) UX / Designer
+3) Frontend Dev
+4) Backend Dev
+5) QA Tester
+6) Docs Writer
+
+[Design B] Additional steps (as needed)
+- Prompt Library Bootstrap (only if /prompts/** or /.codex/skills/** missing/empty)
+- Prompt Tuner loop (optional, eval-gated)
+
+Parallelization:
+- [Design A] Allowed ONLY if specialists write to provably disjoint allowlisted paths and enforcement remains deterministic.
+- Default: sequential.
+
+----------------------------------------------------------------------
+[Design A] Codex invocation protocol
+- Launch `codex exec` as a subprocess.
+- Provide the prompt via stdin using '-' (read prompt from stdin).
+- Capture stdout + stderr.
+- If supported, `--experimental-json` MAY be enabled for diagnostics only.
+- The orchestrator MAY store JSONL event streams under /.orchestrator/runs/** for debugging.
+- The orchestrator MUST NOT use natural-language output (stdout/stderr text or event text) for gating or learning.
+  Allowed gating/learning inputs ONLY:
+  - validator pass/fail + error codes
+  - exit codes
+  - filesystem diffs (changed paths)
+  - hashes/manifests
+  - retry counts
+
+----------------------------------------------------------------------
+[Design A] Filesystem allowlists and forbidden paths
+Global forbidden paths for Codex (hard-fail if touched):
+- /.orchestrator/**
+- /.git/**
+
+[Design B] Global restricted paths (allowed ONLY for special steps)
+- /prompts/** and /.codex/skills/** (ONLY Prompt Library Bootstrap / Prompt Tuner)
+- AGENTS.md (ONLY Release Engineer step, then locked)
+
+Each step must have a per-step allowlist.
+Example minimal allowlists (adapt as needed):
+- Release Engineer: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md, /design/**, /frontend/**, /backend/**, /tests/**
+  - [Design B] plus: AGENTS.md (ONLY in this step)
+- Requirements: REQUIREMENTS.md, AGENT_TASKS.md
+- Designer: /design/**, REQUIREMENTS.md (optional)
+- Frontend: /frontend/**, /tests/**, TEST.md (optional)
+- Backend: /backend/**, /tests/**, TEST.md (optional)
+- QA: /tests/**, TEST.md
+- Docs: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md
+
+[Design A] Change limits (deterministic safety)
+Default per-step caps:
+- max_changed_files = 60
+- max_total_bytes_changed = 500_000
+- max_deleted_files = 0 (unless explicitly allowed for that step)
+If caps exceeded: fail, revert, retry with a stricter constraint patch.
+
+----------------------------------------------------------------------
+[Design A] Deterministic validators (minimum viable, explicit)
+Existence + structure:
+- Required files exist: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md
+- Required directories exist: /design, /frontend, /backend, /tests
+
+[Design B] Additional existence:
+- AGENTS.md exists
+- /prompts exists
+- /.codex/skills exists
+
+Content validators (deterministic string/regex checks):
+REQUIREMENTS.md must contain headings:
+- "# Overview"
+- "# Scope"
+- "# Non-Goals"
+- "# Acceptance Criteria"
+- "# Risks"
+
+TEST.md must contain:
+- "# How to run tests"
+- a fenced code block with at least ONE command
+- "# Environments"
+
+AGENT_TASKS.md must contain:
+- "# Agent Tasks"
+- sections for Requirements, Designer, Frontend, Backend, QA (at minimum)
+- at least 2 bullet tasks per section
+
+[Design B] AGENTS.md content must contain:
+- "# Global Rules"
+- "# File Boundaries"
+- "# How to Run Tests"
+- explicit rule: "Do not modify /.orchestrator/**"
+- After Release Engineer step completes, AGENTS.md becomes LOCKED.
+
+Test command extraction (deterministic):
+- Take the FIRST fenced code block under "# How to run tests" in TEST.md
+- Execute commands line-by-line (skip blanks and lines starting with "#")
+- If extraction fails: validator fails with error code TEST_CMD_MISSING
+- Tests pass only if exit code == 0
+
+----------------------------------------------------------------------
+[Design A] Orchestrator-only learning (persistent; deterministic)
+- Maintain /.orchestrator/policy.json with:
+  - per-step + per-variant stats: attempts, passes, clean_passes, failures by error_code
+  - per-error constraint patches (bounded; max 8 lines per step)
+  - per-step limits overrides (may only tighten safety, never loosen)
+  - variant selection configuration (see below)
+- Policy updates MUST be deterministic functions of:
+  - validator error codes
+  - allowlist violations
+  - exit codes
+  - diff stats (file counts, byte deltas)
+  - retry counts
+- MUST NOT use natural-language interpretation of Codex outputs.
+
+----------------------------------------------------------------------
+[Design A] Prompt variant source and selection (deterministic; replaces epsilon-greedy)
+Design intent:
+- Use multiple prompt variants per agent to improve reliability over time.
+- Selection must be fully deterministic (no RNG).
+
+Variant source:
+- [Design A] The orchestrator MUST support storing prompt variants as:
+  - embedded templates inside orchestrator.py, OR
+  - Python-owned files under /.orchestrator/prompt_templates/<agent>/**
+  Codex must never modify /.orchestrator/**.
+- [Design B] If /prompts/<agent>/** exists, the orchestrator MUST load variants from /prompts/<agent>/** instead of internal templates.
+
+Deterministic prompt epoching (prevents stale stats)
+- Compute prompt_epoch_id as a SHA-256 over the loaded variant contents:
+  - [Design A] hash the resolved templates actually used (embedded or /.orchestrator/prompt_templates)
+  - [Design B] additionally include hashes of /.codex/skills/** that are loaded/used
+- Track stats per (agent_role, prompt_epoch_id).
+- If prompt_epoch_id changes, selection resets to BOOTSTRAP (round-robin) for that role+epoch.
+
+Variant list order:
+- Sort deterministically by relative path (or stable internal name) lexicographically.
+
+Selection is a deterministic 2-phase procedure per (agent_role, prompt_epoch_id):
+
+Definitions:
+- attempts[v] = number of times variant v has been used
+- pass[v] = step validators passed (1/0)
+- clean_pass[v] = validators passed AND retries_used == 0 AND fixer_runs == 0 (1/0)
+- mean_clean[v] = clean_pass[v] / max(1, attempts[v])
+- total_attempts = sum(attempts[v]) over active variants
+
+Phase 1: BOOTSTRAP (deterministic round-robin)
+- bootstrap_min_trials_per_variant = 3 (default; configurable in policy.json)
+- BOOTSTRAP completes only when every active variant has attempts[v] >= bootstrap_min_trials_per_variant.
+- While BOOTSTRAP:
+  - choose next variant in round-robin order:
+    - rr_index = (last_rr_index + 1) mod len(active_variants_sorted)
+  - update last_rr_index deterministically in policy.json
+
+Phase 2: AFTER BOOTSTRAP (choose exactly ONE deterministic strategy)
+- The orchestrator MUST support all strategies below.
+- Configure in policy.json:
+  selection_strategy in {"ucb1", "explore_then_commit", "rr_elimination"}
+- Default selection_strategy = "ucb1"
+
+Strategy A: deterministic UCB1 (ucb1)
+- ucb_c = 1.0 (configurable)
+- ucb_score[v] = mean_clean[v] + ucb_c * sqrt( ln(max(1, total_attempts)) / max(1, attempts[v]) )
+- Choose max ucb_score[v].
+- Tie-break: lexicographically smallest variant id.
+
+Strategy B: explore-then-commit (explore_then_commit)
+- After BOOTSTRAP:
+  - best = argmax_v(mean_clean[v]) with lexicographic tie-break
+- Commit for commit_window_runs = 10 (configurable) selections to best.
+- Deterministic re-explore triggers:
+  - consecutive_not_clean_best increments if NOT clean (fail OR retries_used>0 OR fixer_runs>0)
+  - if consecutive_not_clean_best >= 2 OR mean_clean[best] < 0.3 after >= 10 attempts:
+    - exit commit mode and re-enter BOOTSTRAP for that role+epoch (keep stats)
+
+Strategy C: round-robin with elimination (rr_elimination)
+- Continue deterministic round-robin but maintain eliminated set per role+epoch.
+- Defaults (configurable):
+  - elim_min_trials = 6
+  - elim_min_mean_clean = 0.1
+  - elim_max_failure_rate = 0.9  (failure_rate = 1 - pass[v]/attempts[v])
+- If attempts[v] >= elim_min_trials AND (mean_clean[v] < elim_min_mean_clean OR failure_rate[v] > elim_max_failure_rate):
+  - mark v eliminated and remove from active set
+- If all variants eliminated:
+  - clear eliminated set and re-enter BOOTSTRAP (deterministic recovery)
+
+Selection determinism requirements:
+- No randomness anywhere.
+- Tie-breakers must be deterministic.
+- Every selection decision must be logged (after Codex run window ends) under /.orchestrator/runs/**.
+
+----------------------------------------------------------------------
+[Design A] Fixer runs (narrow, deterministic)
+- A fixer run is a codex exec step with a minimal prompt focused on one deterministic failure:
+  - create missing file/dir
+  - rename incorrect path
+  - add missing required headings
+  - revert unauthorized modifications (after orchestrator reverts via git restore)
+- Fixer allowlist must be minimal and derived from failure type.
+- Fixers are bounded and counted.
+
+----------------------------------------------------------------------
+[Design B] Deterministic eval scoring + prompt/skill improvement loop
+[Design B] Deterministic eval score (exact function; required in B)
+- Hard invalidation: if any hard invariant fails, score = -1 (invalid run)
+- Otherwise:
+  score = 0
+  +40 if all required files/dirs exist (including Design B artifacts)
+  +30 if all content validators pass
+  +30 if tests pass (exit code 0)
+  -5  per retry beyond the first attempt across all steps (total retries)
+  -10 per fixer run executed
+  -1  per changed file above 20 total
+- Score floor: minimum 0 (except invalidation uses -1)
+
+[Design B] Prompt Library Bootstrap (only if needed)
+- Condition: /prompts/** missing/empty OR /.codex/skills/** missing/empty
+- Allowlist: ONLY /prompts/** and /.codex/skills/**
+- Must create:
+  - /prompts/<agent>/*.txt (2–5 variants per agent)
+  - /.codex/skills/<agent>/SKILL.md (YAML front matter + body)
+- Must not modify any other path.
+
+[Design B] Prompt Tuner loop (eval-gated)
+High-level loop (implemented by Python orchestrator)
+1) Run baseline pipeline using current prompts/skills.
+2) Compute baseline deterministic score; store /.orchestrator/evals/<run_id>.json.
+3) Run Prompt Tuner (one codex exec run) allowlisted ONLY to:
+   - /prompts/**
+   - /.codex/skills/**
+4) Validate tuner changes with deterministic guardrails (below).
+5) Re-score deterministically in regression:
+   - preferred: re-run failing steps or steps whose prompt/skill hashes changed
+   - otherwise: re-run full pipeline
+6) Accept changes ONLY IF:
+   - tuned_score > baseline_score (strict improvement)
+   - AND invariants intact (no forbidden paths touched, no allowlist violations, AGENTS.md unchanged, validators/tests pass)
+   - else revert prompt/skill changes deterministically (git restore)
+
+[Design B] Prompt/skill guardrail validators (hard requirements)
+- For /.codex/skills/<agent>/SKILL.md:
+  - must start with YAML front matter (--- ... ---)
+  - required keys: name, description
+  - max file size: 64 KB
+  - forbidden substrings (case-insensitive) must NOT appear:
+    - "ignore validators"
+    - "bypass allowlists"
+    - "write outside allowed paths"
+    - "mark step as done even if tests fail"
+    - "modify .orchestrator"
+- For /prompts/** templates:
+  - max file size: 64 KB
+  - same forbidden substrings must NOT appear
+  - must not instruct proceeding on failure or disabling gating
+
+----------------------------------------------------------------------
+[Design A] Implementation constraints (for Codex to implement)
+- Deliver a single runnable Python script at repo root: orchestrator.py
+- Prefer Python stdlib only.
+- Clear logs to console; machine-readable artifacts under /.orchestrator/runs/**.
+- Orchestrator must not author product source files directly; exceptions allowed ONLY for deterministic reverts:
+  - git restore/checkout to revert unauthorized changes or to revert rejected tuner edits (Design B)
+
+[Design A] What Codex must NOT do
+- Do not claim completion based on narrative text.
+- Do not rely on natural-language summaries for gating.
+- Do not modify forbidden paths.
+- Do not introduce infinite loops or unbounded retries.
+
+[Design A] What Codex must DO
+- Implement orchestrator.py meeting ALL [Design A] requirements.
+- If running in Design B mode, implement ALL [Design B] requirements as well.
+- Ensure required files/dirs exist and exact paths match.
+- Enforce strict boundaries: no Codex writes to /.orchestrator/** during Codex run windows, and never ignore those diffs.

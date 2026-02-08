@@ -1,4 +1,4 @@
-## Version 3 — Hardened Integrated Prompt (Design B, Repo-Resident Orchestrator State)
+## Version 3 — Hardened Integrated Prompt (Repo-Resident Orchestrator State)
 
 Prerequisites (hard requirements)
 - Codex CLI is installed and authenticated.
@@ -32,7 +32,7 @@ Codex MUST create/update these exact paths (case-sensitive):
 - AGENT_TASKS.md
 - directories: /design, /frontend, /backend, /tests
 
-Design B additional required deliverables
+Additional required deliverables
 - AGENTS.md (repo root; stable instructions for all Codex runs; becomes locked after bootstrap)
 - directories:
   - /prompts              (prompt templates/variants; editable ONLY by Prompt Library Bootstrap/Prompt Tuner step)
@@ -76,7 +76,7 @@ Agent model (two-layer design)
 1) Orchestrator / Project Manager (Python)
 - Break work into steps, run specialists, enforce gating, manage retries.
 - Maintain deterministic “learning” state in /.orchestrator/policy.json.
-- Implement Design B evals loop for prompt/skill library evolution with strict guardrails.
+- Implement evals loop for prompt/skill library evolution with strict guardrails.
 
 2) Specialists (each is one `codex exec` run)
 - Each specialist has:
@@ -99,7 +99,7 @@ Pipeline steps (default order; deterministic)
 5) QA Tester
 6) Docs Writer (can be merged earlier if desired)
 
-Design B: Prompt Library Bootstrap + Prompt Tuner (special steps)
+Prompt Library Bootstrap + Prompt Tuner (special steps)
 - Prompt Library Bootstrap:
   - Run ONLY if /prompts/** or /.codex/skills/** is missing or empty.
   - Allowlist is ONLY: /prompts/** and /.codex/skills/**
@@ -194,7 +194,7 @@ Test command source of truth (deterministic)
   - Execute commands line-by-line (skip blank lines and comments starting with "#").
 - If extraction fails, validator fails with a specific error code (e.g., TEST_CMD_MISSING).
 
-Deterministic scoring (Design B; exact function)
+Deterministic scoring (exact function)
 - Scoring is computed ONLY after the pipeline (and after any fixers/retries).
 - Hard invalidation: if any hard invariant fails, score = -1 and run is invalid.
 - Otherwise:
@@ -227,7 +227,7 @@ Prompt variants + selection (deterministic bandit)
   - reward = 1 only if step passes with no fixers and no retries; else 0
   - tie-break deterministically by variant filename sort order
 
-Design B: Prompt Library Bootstrap & Prompt Tuner (guardrailed)
+Prompt Library Bootstrap & Prompt Tuner (guardrailed)
 Prompt Library Bootstrap (only if needed)
 - Condition: /prompts/** missing/empty OR /.codex/skills/** missing/empty
 - Step allowlist: ONLY /prompts/** and /.codex/skills/**

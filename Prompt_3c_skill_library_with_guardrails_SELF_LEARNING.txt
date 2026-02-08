@@ -1,6 +1,14 @@
 ## Version 3 — Hardened Integrated Prompt with Explicit Design A vs Design B Sections
 ## (Repo-resident orchestrator state; deterministic gating; deterministic variant selection)
 
+## What this gives you
+#### A single spec where every requirement is labeled as either [Design A] (core) or [Design B] (extension).
+#### Design A stays “orchestrator-only learning”: deterministic policy + deterministic prompt variant selection, but no Codex self-editing of a prompt library.
+### Design B adds the eval-gated prompt/skill self-improvement loop with strict allowlists and deterministic acceptance.
+
+
+
+
 This specification is split into:
 - [Design A] Core workflow + orchestrator-only learning. (Required in both A and B.)
 - [Design B] Adds an eval-gated loop where Codex may improve a prompt/skill library. (Optional extension; only in B.)

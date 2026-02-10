@@ -1,0 +1,16 @@
+# PROJECT_BRIEF.yaml
+# NOTE: This file is intentionally written as valid JSON (YAML 1.2 JSON subset)
+# so the orchestrator can parse it using Python stdlib `json` without extra deps.
+{
+  "project_type": "scratch_like_game",
+  "tests": {
+    "command_source": "profile",
+    "commands": [
+      "npm test"
+    ]
+  },
+  "notes": {
+    "core_concept": "Scratch-like blocks: Move and Jump blocks guide a dog to a bone. Stronger narrative per level.",
+    "frontend_only": true
+  }
+}

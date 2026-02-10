@@ -1,3 +1,8 @@
+CONTEXT / SPECIFICATION (read fully before responding)
+I’m going to paste a long document.
+Please read it fully and confirm when you’re done.
+Do not analyze or respond until I say so.
+
 ## Version 3.1 — Hardened Integrated Prompt with Explicit Design A vs Design B Sections
 ## (Repo-resident orchestrator state; deterministic gating; deterministic variant selection)
 ## (Minimal modularity patch: optional locked PROJECT_BRIEF.yaml; hardened `.git` checks; deterministic revert incl untracked; JSONL logging clarification; optional safer test command mode)

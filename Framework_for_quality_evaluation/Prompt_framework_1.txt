@@ -1,0 +1,66 @@
+You are an expert in building AI prompts. You are also critical and do not fall for easy text. I want to have a prompt with which I want to build a framework based on webui driven by codex cli as a backend for improving the quality of a product, like UX quality, educational effectiveness, and general performance. I want to be able to run my project in such environment, and be able to grade it on several qualities. Provide some examples how to do that. I want the framework to look like in the attached picture, where I chose my own projects from the tiles and run them. Then grade them.
+
+Here’s a concrete way to build what you’re describing: a local “Dash-style” web UI (tiles per project) that can run Codex CLI workflows on a selected repo and then grade the result on multiple qualities (UX, educational effectiveness, performance, etc.)—very similar to the screenshot: sidebar + tiles + an Evaluation area.
+
+5) Example: evaluation prompt (Codex “Evaluator Agent”)
+This is the kind of prompt you run via codex exec after you’ve generated artifacts (Lighthouse JSON, Playwright report, screenshots, etc.).
+Evaluator Prompt (template)
+
+ROLE: Evaluator. You do not change code. You only grade using provided artifacts.
+
+INPUT ARTIFACTS (paths):
+- Lighthouse JSON: runs/<RUN_ID>/raw/lighthouse.json
+- Playwright report summary: runs/<RUN_ID>/raw/playwright_summary.json
+- Screenshots folder: runs/<RUN_ID>/raw/screenshots/
+- Learning objectives: <repo>/evals/learning_objectives.md
+- Assessment items: <repo>/evals/assessment_items.json
+- App logs: runs/<RUN_ID>/raw/app.log
+
+TASK:
+1) Produce runs/<RUN_ID>/scores/score.json with this schema:
+{
+  "overall": 0-100,
+  "categories": {
+    "ux": {"score":0-100,"reasons":[...],"evidence":[{"type":"file","path":"..."}]},
+    "education": {...},
+    "performance": {...}
+  },
+  "regressions": [{"metric":"...","delta":...,"evidence":...}],
+  "top_actions": [{"title":"...", "expected_impact":"...", "confidence":"low|med|high"}]
+}
+
+RULES:
+- Every reason MUST cite an evidence file path from the artifacts.
+- If evidence is missing, state "insufficient evidence" and lower confidence.
+- Do not speculate about users or outcomes.
+- Prefer deterministic metrics when available (Lighthouse/playwright) over subjective taste.
+
+
+6) Example: improvement prompt (Codex “Improver Agent”) with guardrails
+This is the step that changes the repo. Keep it constrained.
+
+ROLE: Improver. You may modify code only in allowlisted paths.
+GOAL: Improve the scores from runs/<PREV_RUN>/scores/score.json without breaking tests.
+
+INPUTS:
+- Scorecard JSON: runs/<PREV_RUN>/scores/score.json
+- Evidence files referenced in that JSON
+- Repo
+
+CONSTRAINTS:
+- You may only edit:
+  - src/**
+  - docs/**
+- You MUST NOT edit denylisted paths:
+  - infra/**, .github/**, package manager lockfiles unless absolutely required
+- You MUST run: <build command> and <test command>
+- You MUST output a short change summary and the commands you ran.
+
+SUCCESS CRITERIA:
+- After changes, rerun the deterministic eval commands.
+- If any test fails or lighthouse accessibility drops, revert and explain.
+
+
+
+
+I want the evaluation and improvement to be manifested in better prompts for Codex to implement and come up with better quality application.

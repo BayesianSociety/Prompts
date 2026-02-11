@@ -3,14 +3,16 @@
 # so the orchestrator can parse it using Python stdlib `json` without extra deps.
 {
   "project_type": "scratch_like_game",
+  "stack": {
+    "frontend": { "framework": "nextjs", "language": "typescript", "path": "frontend" },
+    "backend":  { "framework": "node",   "language": "typescript", "path": "backend" },
+    "database": { "engine": "postgres", "local_dev": "docker_compose" },
+    "orm": "prisma"
+  },
   "tests": {
     "command_source": "profile",
-    "commands": [
-      "npm test"
-    ]
-  },
-  "notes": {
-    "core_concept": "Scratch-like blocks: Move and Jump blocks guide a dog to a bone. Stronger narrative per level.",
-    "frontend_only": true
+    "commands": ["npm test"]
   }
 }
+
+

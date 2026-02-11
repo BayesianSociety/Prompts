@@ -246,14 +246,14 @@ Global forbidden paths for Codex (hard-fail if touched):
 
 Each step must have a per-step allowlist.
 Example minimal allowlists (adapt as needed):
-- Release Engineer: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md, /design/**, /frontend/**, /backend/**, /tests/**
+- Release Engineer: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md, docker-compose.yml, .env.example, .gitignore, /design/**, /frontend/**, /backend/**, /tests/**
   - [Design B] plus: AGENTS.md (ONLY in this step)
   - [Layer 0–2] plus: project brief file (e.g., PROJECT_BRIEF.md) (ONLY in this step, then locked)
   - [Modularity] plus: project brief config file (e.g., PROJECT_BRIEF.yaml) (ONLY in this step, then locked)
 - Requirements: REQUIREMENTS.md, AGENT_TASKS.md  [Layer 1]
 - Designer: /design/**, REQUIREMENTS.md (optional)  [Layer 3]
 - Frontend: /frontend/**, /tests/**, TEST.md (optional)  [Layer 2 + Layer 3]
-- Backend: /backend/**, /tests/**, TEST.md (optional)  [Layer 2]
+- Backend: /backend/**, /tests/**, TEST.md (optional), .env.example (optional), docker-compose.yml (optional)  [Layer 2]
 - QA: /tests/**, TEST.md  [Layer 2]
 - Docs: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md  [Layer 1/2]
 
@@ -269,6 +269,12 @@ If caps exceeded: fail, revert, retry with a stricter constraint patch.
 Existence + structure:
 - Required files exist: REQUIREMENTS.md, TEST.md, AGENT_TASKS.md
 - Required directories exist: /design, /frontend, /backend, /tests
+
+[Layer 2] Infrastructure file validators (if DB/backend is required by PROJECT_BRIEF.md or PROJECT_BRIEF.yaml)
+- If the project requires Docker Compose:
+  - docker-compose.yml MUST exist at repo root.
+  - .env.example MUST exist at repo root.
+  - .gitignore MUST include ".env" (string match) to prevent accidental secret commits.
 
 [Design B] Additional existence:
 - AGENTS.md exists

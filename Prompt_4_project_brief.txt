@@ -40,11 +40,17 @@
 - Tests run deterministically and exit with code 0.
 
 # Layer 2 — Architecture constraints
-- **Frontend-only** (no backend required for MVP). Create `/backend` as a placeholder if required by the workflow, but do not implement server logic unless needed later.
-- **Level format:** JSON files under `/design/levels/` (one file per level).
-- **Execution model:** Compile blocks into a simple internal instruction list, then interpret step-by-step.
-- **Persistence:** localStorage (or equivalent local mechanism).
-- **Testing:** must run offline and deterministically.
+- **Backend REQUIRED** for MVP. The `/backend` directory MUST contain server logic.
+- **Frontend framework:** Next.js (TypeScript). The Next.js app MUST live in `/frontend`.
+- **Backend framework:** Node.js API (TypeScript) living in `/backend` (e.g., Express/Fastify) OR Next.js route handlers in `/frontend` (choose ONE and follow it consistently).
+- **Database:** PostgreSQL is the source of truth. Local development MUST use Docker Compose (repo-root `docker-compose.yml`).
+- **Data access / migrations:** Use Prisma (or explicitly choose another migration tool). If Prisma: include `/backend/prisma/schema.prisma` and migrations workflow.
+- **Level format:** JSON files under `/design/levels/` (one file per level) OR stored in Postgres (choose ONE; for MVP prefer JSON-on-disk unless you truly need DB-authored content).
+- **Execution model:** Compile blocks into a simple internal instruction list, then interpret step-by-step deterministically.
+- **Persistence:** Store user progress in Postgres ONLY if you have accounts. If no accounts, store progress locally (localStorage) and keep DB for content/admin only.
+- **Testing:** must run offline and deterministically. Provide a deterministic test command in `TEST.md` and ensure it exits with code 0. Tests MUST spin up Postgres locally (docker compose) or use a deterministic test DB container.
+- **Security:** No secrets committed. Provide `.env.example` and keep real secrets out of the repo.
+
 
 # Layer 3 — Content & UX specifics (may evolve iteratively under /design/**)
 ## Scratch-like editor UX

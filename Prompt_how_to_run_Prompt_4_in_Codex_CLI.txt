@@ -1,0 +1,87 @@
+Input:
+You are a OpenAI codex cli expert. I have a very long prompt split in two text files. Explain how to make codex cli execute this prompt. Explain if I should use Agent.md or Skill.md or any other ideas you might have. Be honest, be critical do not make things up. Do not lie.
+
+
+
+
+Output:
+If your “very long prompt” is split across two text files, the simplest way to make Codex CLI execute it is to **concatenate the files and pass them as the initial `codex exec` prompt via stdin**.
+
+## 1) Run the two files as *the* prompt (non-interactive)
+
+Codex `exec` accepts the prompt as either a string **or `-` to read from stdin**. ([OpenAI Developers][1])
+
+### Option A — concatenate then pipe
+
+```bash
+cat prompt_part1.txt prompt_part2.txt | codex exec -
+```
+
+### Option B — keep a “wrapper” file that includes both
+
+```bash
+cat prompt_part1.txt prompt_part2.txt > PROMPT_ALL.txt
+codex exec - < PROMPT_ALL.txt
+```
+
+### Useful flags for automation
+
+* `--full-auto` if you want Codex to be able to edit the repo without stopping for approvals (it’s an automation preset). ([OpenAI Developers][1])
+* `--json` if you want machine-readable JSONL events on stdout (good for orchestrators). ([OpenAI Developers][2])
+* `-o <path>` / `--output-last-message <path>` to also write the final assistant message to a file. ([OpenAI Developers][1])
+
+Example:
+
+```bash
+cat prompt_part1.txt prompt_part2.txt \
+  | codex exec --full-auto --json -o ./last_message.txt -
+```
+
+## 2) Should this be AGENTS.md or a skill instead of a giant one-shot prompt?
+
+### Use **AGENTS.md** for “always-on project rules” (recommended)
+
+Codex **automatically reads `AGENTS.md`** before doing work, with a defined discovery/precedence chain (global `~/.codex` + project root down to cwd, with overrides). ([OpenAI Developers][3])
+
+This is ideal for:
+
+* repo norms (“run tests”, “don’t add deps without asking”, “coding style”, “where files live”)
+* safety constraints (“never touch prod configs”, “don’t run destructive commands”)
+* workflow conventions (“use pnpm”, “update docs when changing behavior”)
+
+**Critical limit:** Codex stops adding instruction files once the combined chain hits `project_doc_max_bytes` (32KiB by default). If your prompt is enormous, stuffing it all into AGENTS.md can get it truncated or force you into awkward splitting. ([OpenAI Developers][3])
+
+Also: it’s **`AGENTS.md` (plural)** by default. If you currently have `Agent.md`, Codex won’t treat it as instructions unless you configure fallback filenames. ([OpenAI Developers][3])
+
+### Use a **Skill** when you want a reusable, packaged workflow
+
+OpenAI’s Codex “agent skills” are meant to bundle **instructions + resources + optional scripts** into something repeatable and shareable across CLI/IDE/app. ([OpenAI Developers][4])
+
+This is ideal when your “long prompt” is really a *procedure* (multi-step, consistent outputs, maybe helper scripts), not just “project norms”.
+
+### A practical split that usually works best
+
+* **AGENTS.md:** stable “constitution” for the repo (guardrails, standards, commands to run, where things go).
+* **Skill:** your repeatable workflow (e.g., “evaluate UX”, “run educational effectiveness rubric”, “generate prompt patches”, etc.).
+* **One-shot `codex exec` prompt:** the *task instance* (what you want done *today*), short and specific, possibly pointing to inputs.
+
+## 3) One more honest/critical point about “executing a long prompt”
+
+Codex doesn’t have a native “include these two files as separate system layers” concept in CLI usage. If you pass both files as the initial prompt, it’s just one big instruction blob. That works, but it’s brittle:
+
+* easy to exceed instruction-size limits (especially once AGENTS.md is also loaded)
+* harder to maintain over time
+* harder to audit “what changed” vs keeping stable parts in AGENTS.md / skills
+
+So: **use `codex exec -` to run it today**, but **migrate the stable parts into AGENTS.md and/or a skill** for reliability.
+
+If you paste (or summarize) what the two files contain (e.g., “repo rules” vs “workflow procedure”), I can suggest a clean split into:
+
+* `AGENTS.md` (what belongs there, with directory scoping)
+* a skill skeleton (what files go where, what the entry instructions should look like)
+* a short `codex exec` wrapper prompt that calls the workflow without re-sending the whole novel every run
+
+[1]: https://developers.openai.com/codex/cli/reference "Command line options"
+[2]: https://developers.openai.com/codex/noninteractive "Non-interactive mode"
+[3]: https://developers.openai.com/codex/guides/agents-md "Custom instructions with AGENTS.md"
+[4]: https://developers.openai.com/codex/skills?utm_source=chatgpt.com "Agent Skills - developers.openai.com"

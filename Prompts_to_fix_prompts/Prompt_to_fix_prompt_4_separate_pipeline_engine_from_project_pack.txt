@@ -20,6 +20,9 @@ Solve release_engineer problem
 From full prompt, prepare sub prompts for individual agents such as designer, frontend or backend
 
 7.
+Compare orchestrator.py to multi_agent_workflow_deterministic_ver3_finance.py and explain why there are more prompts in multi_agent_workflow_deterministic_ver3_finance.py agent specific then in orchestrator. Also explain which setup is better and more modular. And where in orchestrator.py the subagents recieive their sub prompts.
+
+8.
 - Use .orchestrator logs to analyse the failures
 - See which part of the code in orchestrator.py code is responsible for those failures
 - See which part of Prompt_4 is responsible for building in those failures into orchestrator.py

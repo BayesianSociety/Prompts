@@ -1,0 +1,25 @@
+1.
+No description and verbose of what the orchestrator.py is doing
+- silent execution
+- no status information
+- verbose mode - provide step - by - step  logs of its internal actions
+
+2.
+Make Writable sessions
+
+3. 
+Provide description on how to run the app
+
+4. 
+Use only the latest version of Next.js
+
+5.
+Solve release_engineer problem
+
+6. 
+From full prompt, prepare sub prompts for individual agents such as designer, frontend or backend
+
+7.
+- Use .orchestrator logs to analyse the failures
+- See which part of the code in orchestrator.py code is responsible for those failures
+- See which part of Prompt_4 is responsible for building in those failures into orchestrator.py

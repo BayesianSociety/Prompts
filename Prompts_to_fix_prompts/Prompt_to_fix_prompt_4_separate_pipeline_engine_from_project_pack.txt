@@ -26,3 +26,27 @@ Compare orchestrator.py to multi_agent_workflow_deterministic_ver3_finance.py an
 - Use .orchestrator logs to analyse the failures
 - See which part of the code in orchestrator.py code is responsible for those failures
 - See which part of Prompt_4 is responsible for building in those failures into orchestrator.py
+
+9.
+Orchestrator.py does not use a single fixed prompt per role. It builds a set of candidate prompts (“variants”) for each agent step, then chooses one variant each run using a policy. I want to have a step logged and writen to a file for each agent step.
+
+10.
+Add a schema-constrained planning step before specialists
+- Why: forces coherent role/output contracts up front.
+
+Pass a hashed manifest snapshot into every specialist prompt
+- Why: improves reproducibility and reduces silent drift in what agents assume exists.
+
+Run independent steps in parallel with one combined policy check
+- Why: faster generation and cleaner separation of independent concerns.
+
+Add explicit docs/runbook deliverables as first-class artifacts
+- Why: complete app output, not just code skeleton.
+
+Add pluggable “data-specialist” role pattern
+- Why: enables stronger app creation for data-heavy projects (scan/index/normalize before UI/API).
+
+11. 
+The frontend of the application flow must utilize the created backend.
+
+codex resume 019c7279-fc36-7bd1-8b1a-40d32a011a0f

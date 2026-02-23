@@ -657,3 +657,169 @@ This confirms initialization and exposes key stats immediately when a session op
 - improves situational awareness in multi-tab/multi-session workflows
 - reduces need to inspect logs/files manually for routine state
 - turns algorithm/work state into visible UI cues without building a heavyweight frontend
+
+
+
+› How should my code look like to emulate hooks?
+
+
+• import asyncio
+  import json
+  from dataclasses import dataclass, field
+  from pathlib import Path
+  from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+  MODEL = "gpt-5-codex"
+  SANDBOX = "workspace-write"
+  APPROVAL = "default"
+
+  HookFn = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+  @dataclass
+  class HookBus:
+      handlers: Dict[str, List[HookFn]] = field(default_factory=lambda: {
+          "on_start": [],
+          "on_prompt": [],
+          "on_tool_pre": [],
+          "on_tool_post": [],
+          "on_stop": [],
+          "on_end": [],
+          "on_error": [],
+      })
+
+      def on(self, event: str, fn: HookFn) -> None:
+          self.handlers.setdefault(event, []).append(fn)
+
+      async def emit(self, event: str, payload: Dict[str, Any]) -> None:
+          for fn in self.handlers.get(event, []):
+              await fn(payload)
+
+
+  def _map_event(raw: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+      """
+      Map codex JSON events -> hook events.
+      Adjust these keys to match actual --experimental-json output.
+      """
+      t = raw.get("type") or raw.get("event")
+
+      # examples; tune to real schema
+      if t == "prompt_submitted":
+          return "on_prompt", raw
+      if t == "tool_call_started":
+          return "on_tool_pre", raw
+      if t == "tool_call_finished":
+          return "on_tool_post", raw
+      if t in ("response_completed", "run_stopped"):
+          return "on_stop", raw
+      return None
+
+
+  async def run_codex(
+      prompt: str,
+      *,
+      hooks: HookBus,
+      cwd: Optional[Path] = None,
+      extra_args: Optional[List[str]] = None,
+  ) -> Tuple[str, Dict[str, Any]]:
+      cmd = [
+          "codex",
+          "exec",
+          "--experimental-json",
+          "--model", MODEL,
+          "--sandbox", SANDBOX,
+          "--config", APPROVAL,
+          "--skip-git-repo-check",
+      ]
+      if extra_args:
+          cmd.extend(extra_args)
+      cmd.append(prompt)
+
+      context: Dict[str, Any] = {
+          "prompt": prompt,
+          "cmd": cmd,
+          "cwd": str(cwd) if cwd else None,
+          "events": [],
+          "stdout_lines": [],
+          "stderr_lines": [],
+          "final_text": "",
+          "returncode": None,
+      }
+
+      await hooks.emit("on_start", context)
+
+      proc = await asyncio.create_subprocess_exec(
+          *cmd,
+          cwd=str(cwd) if cwd else None,
+          stdout=asyncio.subprocess.PIPE,
+          stderr=asyncio.subprocess.PIPE,
+      )
+
+      async def read_stdout() -> None:
+          assert proc.stdout
+          while True:
+              line = await proc.stdout.readline()
+              if not line:
+                  break
+              s = line.decode("utf-8", errors="replace").rstrip("\n")
+              context["stdout_lines"].append(s)
+
+              try:
+                  evt = json.loads(s)
+                  context["events"].append(evt)
+                  mapped = _map_event(evt)
+                  if mapped:
+                      name, payload = mapped
+                      await hooks.emit(name, payload)
+
+                  # optional: collect assistant text if present
+                  if "output_text" in evt:
+                      context["final_text"] += evt["output_text"]
+              except json.JSONDecodeError:
+                  # if some lines are plain text
+                  context["final_text"] += s + "\n"
+
+      async def read_stderr() -> None:
+          assert proc.stderr
+          while True:
+              line = await proc.stderr.readline()
+              if not line:
+                  break
+              context["stderr_lines"].append(line.decode("utf-8", errors="replace").rstrip("\n"))
+
+      try:
+          await asyncio.gather(read_stdout(), read_stderr())
+          rc = await proc.wait()
+          context["returncode"] = rc
+          await hooks.emit("on_end", context)
+          return context["final_text"], context
+      except Exception as e:
+          context["error"] = str(e)
+          await hooks.emit("on_error", context)
+          raise
+
+
+  # ----------------- Example hooks -----------------
+
+  async def log_start(ctx: Dict[str, Any]) -> None:
+      print(f"[start] {ctx['cmd']}")
+
+  async def log_tool_pre(evt: Dict[str, Any]) -> None:
+      print(f"[tool pre] {evt}")
+
+  async def log_tool_post(evt: Dict[str, Any]) -> None:
+      print(f"[tool post] {evt}")
+
+  async def log_end(ctx: Dict[str, Any]) -> None:
+      print(f"[end] rc={ctx['returncode']}")
+
+  # Usage:
+  # hooks = HookBus()
+  # hooks.on("on_start", log_start)
+  # hooks.on("on_tool_pre", log_tool_pre)
+  # hooks.on("on_tool_post", log_tool_post)
+  # hooks.on("on_end", log_end)
+  # text, meta = await run_codex("fix failing tests", hooks=hooks)
+
+  If you want hard pre/post control even when Codex JSON lacks tool events, the next step is a proxy command
+  (safe_bash) that emits on_tool_pre/on_tool_post itself.
